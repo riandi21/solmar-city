@@ -1,8 +1,9 @@
 // Sound for Solmar City: everything is synthesized live with WebAudio, no audio
 // files. Engine hum, two-tone police siren, gunshot noise, punch thud, a little
-// mission-complete jingle, and a lazy coastal bassline-and-pad loop for music.
-// The AudioContext is only created on the first user gesture (start()), and every
-// method is safe to call before that — it just does nothing until there is sound.
+// mission-complete jingle, and a car radio with three switchable synth
+// stations (C cycles them). The AudioContext is only created on the first
+// user gesture (start()), and every method is safe to call before that — it
+// just does nothing until there is sound.
 export function createAudio() {
   let ctx = null;
   let master = null;
@@ -23,20 +24,71 @@ export function createAudio() {
   let musicStep = 0;
   let nextNoteTime = 0;
 
-  // Chill coastal loop: A minor-ish walk, 100 bpm, eighth-note steps.
-  // Bass roots (Hz) and the pad chord tones that sit above each bar.
-  const BASSLINE = [55.0, 55.0, 65.41, 49.0, 55.0, 55.0, 82.41, 73.42];
-  const CHORDS = [
-    [220.0, 261.63, 329.63], // Am
-    [220.0, 261.63, 329.63],
-    [174.61, 220.0, 261.63], // F
-    [196.0, 246.94, 293.66], // G
-    [220.0, 261.63, 329.63],
-    [220.0, 261.63, 329.63],
-    [164.81, 220.0, 261.63], // E-ish lift
-    [196.0, 246.94, 293.66],
+  // Car radio: three synth stations. Each one picks its own tempo, bass
+  // roots (Hz, one per eighth-note step), pad chords and bass wave.
+  // chords: 8 entries, one per bar-step slot; the sequencer plays chords[0]
+  // on even bars and chords[4] on odd bars (see scheduleMusicStep).
+  const STATIONS = [
+    {
+      name: 'Solmar FM',
+      bpm: 100,
+      wave: 'triangle',
+      offbeat: false,
+      bass: [55.0, 55.0, 65.41, 49.0, 55.0, 55.0, 82.41, 73.42],
+      chords: [
+        [220.0, 261.63, 329.63], // Am
+        [220.0, 261.63, 329.63],
+        [174.61, 220.0, 261.63], // F
+        [196.0, 246.94, 293.66], // G
+        [220.0, 261.63, 329.63],
+        [220.0, 261.63, 329.63],
+        [164.81, 220.0, 261.63], // E-ish lift
+        [196.0, 246.94, 293.66],
+      ],
+    },
+    {
+      name: 'Coral Nights',
+      bpm: 116,
+      wave: 'square',
+      offbeat: false,
+      // Darker synthwave walk: Am / F / Dm / E, square bass bites harder.
+      bass: [55.0, 55.0, 43.65, 55.0, 49.0, 49.0, 73.42, 82.41],
+      chords: [
+        [220.0, 261.63, 329.63], // Am
+        [220.0, 261.63, 329.63],
+        [174.61, 220.0, 261.63], // F
+        [146.83, 174.61, 220.0], // Dm
+        [164.81, 207.65, 246.94], // E
+        [164.81, 207.65, 246.94],
+        [174.61, 220.0, 261.63], // F
+        [196.0, 246.94, 293.66], // G
+      ],
+    },
+    {
+      name: 'Portside',
+      bpm: 88,
+      wave: 'triangle',
+      offbeat: true, // reggae-ish: the bass lands on the off-beats only
+      // Bright island walk: C / F / G, roots bounce a fifth up on the skank.
+      bass: [65.41, 98.0, 65.41, 87.31, 73.42, 110.0, 65.41, 98.0],
+      chords: [
+        [261.63, 329.63, 392.0], // C
+        [261.63, 329.63, 392.0],
+        [174.61, 220.0, 261.63], // F
+        [196.0, 246.94, 293.66], // G
+        [196.0, 246.94, 293.66], // G
+        [196.0, 246.94, 293.66],
+        [174.61, 220.0, 261.63], // F
+        [261.63, 329.63, 392.0], // C
+      ],
+    },
   ];
-  const STEP_SECONDS = 60 / 100 / 2; // eighth notes at 100 bpm
+  let stationIndex = 0;
+
+  /** Length of one eighth-note step at the active station's tempo. */
+  function stepSeconds() {
+    return 60 / STATIONS[stationIndex].bpm / 2;
+  }
 
   function ensureContext() {
     if (ctx) return true;
@@ -132,22 +184,29 @@ export function createAudio() {
   }
 
   function scheduleMusicStep(step, time) {
+    const station = STATIONS[stationIndex];
+    const ss = stepSeconds();
     const bar = Math.floor(step / 8) % 2;
     const beat = step % 8;
-    // Bass on every step, quieter on the off-beats.
-    const bass = ctx.createOscillator();
-    bass.type = 'triangle';
-    bass.frequency.value = BASSLINE[beat];
-    const bassGain = ctx.createGain();
-    bassGain.gain.setValueAtTime(beat % 2 === 0 ? 0.16 : 0.09, time);
-    bassGain.gain.exponentialRampToValueAtTime(0.0001, time + STEP_SECONDS * 0.95);
-    bass.connect(bassGain);
-    bassGain.connect(master);
-    bass.start(time);
-    bass.stop(time + STEP_SECONDS);
+    // Bass on the steps the station wants: every step, except offbeat
+    // stations (Portside) which only play on the off-beats. Quieter there.
+    const playBass = !station.offbeat || beat % 2 === 1;
+    if (playBass) {
+      const bass = ctx.createOscillator();
+      bass.type = station.wave;
+      bass.frequency.value = station.bass[beat];
+      const bassGain = ctx.createGain();
+      const vol = station.wave === 'square' ? 0.09 : 0.16;
+      bassGain.gain.setValueAtTime(beat % 2 === 0 ? vol : vol * 0.55, time);
+      bassGain.gain.exponentialRampToValueAtTime(0.0001, time + ss * 0.95);
+      bass.connect(bassGain);
+      bassGain.connect(master);
+      bass.start(time);
+      bass.stop(time + ss);
+    }
     // Pad chord at the top of each bar, soft and slow.
     if (beat === 0) {
-      const chord = CHORDS[bar * 4];
+      const chord = station.chords[bar * 4];
       for (let i = 0; i < chord.length; i += 1) {
         const pad = ctx.createOscillator();
         pad.type = 'sine';
@@ -155,11 +214,11 @@ export function createAudio() {
         const padGain = ctx.createGain();
         padGain.gain.setValueAtTime(0, time);
         padGain.gain.linearRampToValueAtTime(0.045, time + 0.4);
-        padGain.gain.linearRampToValueAtTime(0.0001, time + STEP_SECONDS * 8);
+        padGain.gain.linearRampToValueAtTime(0.0001, time + ss * 8);
         pad.connect(padGain);
         padGain.connect(master);
         pad.start(time);
-        pad.stop(time + STEP_SECONDS * 8);
+        pad.stop(time + ss * 8);
       }
     }
   }
@@ -168,7 +227,7 @@ export function createAudio() {
     if (!ctx || !musicOn || muted) return;
     while (nextNoteTime < ctx.currentTime + 0.25) {
       scheduleMusicStep(musicStep, Math.max(nextNoteTime, ctx.currentTime));
-      nextNoteTime += STEP_SECONDS;
+      nextNoteTime += stepSeconds();
       musicStep = (musicStep + 1) % 64;
     }
   }
@@ -256,11 +315,32 @@ export function createAudio() {
       if (master && ctx) master.gain.setTargetAtTime(m ? 0 : 0.5, ctx.currentTime, 0.05);
     },
 
+    /** Radio: cycle to the next station (C key). Returns the new name. */
+    nextStation() {
+      stationIndex = (stationIndex + 1) % STATIONS.length;
+      return STATIONS[stationIndex].name;
+    },
+
+    /** Radio: jump to station i (wraps, so -1 is the last station). */
+    setStation(i) {
+      const n = STATIONS.length;
+      stationIndex = ((Math.floor(i) % n) + n) % n;
+      return STATIONS[stationIndex].name;
+    },
+
+    /** Radio: name of the station now playing. */
+    stationName() {
+      return STATIONS[stationIndex].name;
+    },
+
     get muted() {
       return muted;
     },
     get sirenOn() {
       return sirenActive;
+    },
+    get station() {
+      return stationIndex;
     },
   };
 }

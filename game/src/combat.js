@@ -1,9 +1,13 @@
-// Combat for Solmar City — fists, a pistol, and the rival gang shooters
-// who show up for the Marina Job (mission 4).
+// Combat for Solmar City — fists, pistol, SMG, shotgun, and the rival
+// gang shooters who show up for the Marina Job (mission 4) and the
+// arc-2 squad fights (missions 5 and 8).
 //
-// Controls: keys 1 / 2 switch between fists and pistol, F punches, left
-// mouse click shoots while the pistol is armed. Ammo is 24 and is refilled
-// at the start of every mission (missions.js sets world.player.ammo).
+// Controls: keys 1 / 2 / 3 / 4 switch fists / pistol / SMG / shotgun,
+// F punches, left mouse click shoots while a gun is armed. The SMG fires
+// a 3-round burst per click; the shotgun fires 5 pellets with a slow
+// cooldown. Ammo is kept per weapon (pistol 24, SMG 90, shotgun 12) and
+// refilled at the start of every mission; world.player.ammo always
+// mirrors the CURRENT weapon's ammo (0 for fists).
 //
 // The player has 100 health and slowly regains it after 10 quiet seconds.
 // At 0 health the run ends: world.mode becomes 'over' and main.js shows
@@ -23,6 +27,14 @@
 import * as THREE from 'three';
 
 export const PISTOL_AMMO = 24;
+export const SMG_AMMO = 90;
+export const SMG_DAMAGE = 12;
+export const SMG_RANGE = 45;
+export const SHOTGUN_AMMO = 12;
+export const SHOTGUN_DAMAGE = 10; // per pellet
+export const SHOTGUN_RANGE = 25;
+export const SHOTGUN_PELLETS = 5;
+export const SHOTGUN_COOLDOWN = 0.9; // seconds between shotgun blasts
 export const PLAYER_MAX_HEALTH = 100;
 export const ENEMY_HEALTH = 50;
 export const PUNCH_RANGE = 2; // metres
@@ -31,6 +43,17 @@ export const SHOT_DAMAGE = 25;
 export const SHOT_RANGE = 60;
 export const REGEN_DELAY = 10; // seconds without being hit before regen
 export const REGEN_RATE = 5; // health per second
+
+// Full magazine per gun; the shop and the mission-start refill use these.
+const WEAPON_AMMO = { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO };
+// Per-weapon firing behaviour. The pistol keeps its v1 numbers exactly.
+const WEAPON_STATS = {
+  pistol: { damage: SHOT_DAMAGE, range: SHOT_RANGE, cone: 0.18, pellets: 1, knockback: 0 },
+  smg: { damage: SMG_DAMAGE, range: SMG_RANGE, cone: 0.3, pellets: 1, knockback: 0 },
+  shotgun: { damage: SHOTGUN_DAMAGE, range: SHOTGUN_RANGE, cone: 0.38, pellets: SHOTGUN_PELLETS, knockback: 4 },
+};
+const SMG_BURST_ROUNDS = 3;
+const SMG_BURST_GAP = 0.06; // seconds (60 ms) between burst rounds
 
 const PUNCH_COOLDOWN = 0.4;
 const ENEMY_SHOT_MIN = 1.2; // seconds between enemy shots
@@ -76,15 +99,20 @@ function makeShooterMesh() {
 
 export function createCombat(scene, world) {
   const state = {
-    weapon: 'fists', // 'fists' | 'pistol'
-    ammo: PISTOL_AMMO,
-    enemies: [], // { mesh, pos, health, shootTimer }
+    weapon: 'fists', // 'fists' | 'pistol' | 'smg' | 'shotgun'
+    ammo: 0, // the CURRENT weapon's ammo; fists carry none
+    ammoByWeapon: { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO },
+    enemies: [], // { mesh, pos, health, shootTimer, squad, spawnMission }
     enemiesSpawned: false,
+    lastMissionId: world.mission ? world.mission.id : 0,
     lastHitAt: -Infinity,
     punchCooldown: 0,
+    shotgunCooldown: 0,
+    burstLeft: 0, // SMG burst rounds still to fire
+    burstTimer: 0, // seconds until the next burst round
     tracers: [], // { line, life } — fade out fast
   };
-  if (world.player) world.player.ammo = PISTOL_AMMO;
+  if (world.player) world.player.ammo = 0;
 
   // --- tracers ------------------------------------------------------------
   function addTracer(from, to, color) {
@@ -132,10 +160,47 @@ export function createCombat(scene, world) {
         pos: mesh.position,
         health: ENEMY_HEALTH,
         shootTimer: 0.8 + Math.random() * 1.2,
+        squad: false,
+        spawnMission: 4,
       });
     }
     state.enemiesSpawned = true;
     if (world.hud) world.hud.showMessage('Rival gang shooters at the marina — watch out!');
+  }
+
+  // Rival-squad API for the arc-2 missions (5 and 8): one shooter at each
+  // spot, flagged so the mission can count them. Returns how many spawned.
+  // Spots are {x, z} (a THREE.Vector3 works too — only .x/.z are read).
+  function spawnRivalSquad(spots) {
+    if (!Array.isArray(spots)) return 0;
+    let spawned = 0;
+    for (const spot of spots) {
+      try {
+        if (!spot || typeof spot.x !== 'number' || typeof spot.z !== 'number') continue;
+        const mesh = makeShooterMesh();
+        mesh.position.set(spot.x, 0, spot.z);
+        scene.add(mesh);
+        state.enemies.push({
+          mesh,
+          pos: mesh.position,
+          health: ENEMY_HEALTH,
+          shootTimer: 0.8 + Math.random() * 1.2,
+          squad: true,
+          spawnMission: world.mission ? world.mission.id : 0,
+        });
+        spawned += 1;
+      } catch {
+        // One bad spot never blocks the rest of the squad.
+      }
+    }
+    return spawned;
+  }
+
+  // How many squad rivals are still standing.
+  function rivalsRemaining() {
+    let n = 0;
+    for (const enemy of state.enemies) if (enemy.squad === true) n += 1;
+    return n;
   }
 
   function removeEnemy(enemy) {
@@ -153,7 +218,7 @@ export function createCombat(scene, world) {
   function nearestInRange(list, range) {
     let best = null;
     let bestD = range;
-    for (const item of list) {
+    for (const item of list || []) {
       const d = distXZ(world.player.pos, item.pos);
       if (d < bestD) {
         best = item;
@@ -161,6 +226,19 @@ export function createCombat(scene, world) {
       }
     }
     return best;
+  }
+
+  // Shove a ped or enemy away from a point (punch, shotgun blast).
+  function shoveTarget(target, from, strength) {
+    const dx = target.pos.x - from.x;
+    const dz = target.pos.z - from.z;
+    const len = Math.max(0.01, Math.sqrt(dx * dx + dz * dz));
+    target.pos.x += (dx / len) * strength;
+    target.pos.z += (dz / len) * strength;
+    if (target.mesh) {
+      target.mesh.position.x = target.pos.x;
+      target.mesh.position.z = target.pos.z;
+    }
   }
 
   function punch() {
@@ -173,15 +251,7 @@ export function createCombat(scene, world) {
       return false;
     }
     // Knock the target away from the player and hurt it.
-    const dx = target.pos.x - world.player.pos.x;
-    const dz = target.pos.z - world.player.pos.z;
-    const len = Math.max(0.01, Math.sqrt(dx * dx + dz * dz));
-    target.pos.x += (dx / len) * 3;
-    target.pos.z += (dz / len) * 3;
-    if (target.mesh) {
-      target.mesh.position.x = target.pos.x;
-      target.mesh.position.z = target.pos.z;
-    }
+    shoveTarget(target, world.player.pos, 3);
     if (state.enemies.includes(target)) {
       damageEnemy(target, PUNCH_DAMAGE);
     } else {
@@ -192,32 +262,71 @@ export function createCombat(scene, world) {
     return true;
   }
 
-  function aimPoint() {
-    // The pistol fires along the player's facing direction, level with the
-    // chest, out to SHOT_RANGE. Heading 0 faces -Z (north on the map).
+  // --- weapons ------------------------------------------------------------
+  // Keep state.ammo / world.player.ammo on the current weapon's reserve.
+  function syncAmmo() {
+    if (state.weapon === 'fists') {
+      state.ammo = 0;
+    } else {
+      state.ammo = state.ammoByWeapon[state.weapon] ?? 0;
+    }
+    if (world.player) world.player.ammo = state.ammo;
+  }
+
+  function switchWeapon(name) {
+    if (state.weapon === name) return;
+    state.weapon = name;
+    // A half-fired burst does not follow the player to the next weapon.
+    state.burstLeft = 0;
+    state.burstTimer = 0;
+    syncAmmo();
+  }
+
+  // Refill every gun to a full magazine (mission start).
+  function refillAllAmmo() {
+    for (const name of Object.keys(state.ammoByWeapon)) {
+      state.ammoByWeapon[name] = WEAPON_AMMO[name];
+    }
+    syncAmmo();
+  }
+
+  // Shop buy: refill the CURRENT weapon to full. Fists carry no ammo, so
+  // there is nothing to refill — still returns true.
+  function buyAmmo() {
+    if (state.weapon === 'fists') return true;
+    const full = WEAPON_AMMO[state.weapon];
+    if (full === undefined) return true;
+    state.ammoByWeapon[state.weapon] = full;
+    syncAmmo();
+    return true;
+  }
+
+  function aimPoint(range) {
+    // A gun fires along the player's facing direction, level with the
+    // chest, out to its own range. Heading 0 faces -Z (north on the map).
     const h = world.player.heading || 0;
     const from = new THREE.Vector3(world.player.pos.x, 1.4, world.player.pos.z);
     const to = new THREE.Vector3(
-      from.x - Math.sin(h) * SHOT_RANGE,
+      from.x - Math.sin(h) * range,
       1.4,
-      from.z - Math.cos(h) * SHOT_RANGE,
+      from.z - Math.cos(h) * range,
     );
     return { from, to, heading: h };
   }
 
-  function targetInCone(list, from, heading) {
-    // Nearest thing roughly in front of the shooter: within ~10 degrees of
-    // the aim line and inside SHOT_RANGE.
+  function targetInCone(list, from, heading, range, cone) {
+    // Nearest thing roughly in front of the shooter: within `cone`
+    // radians of the aim line and inside `range`.
     let best = null;
-    let bestD = SHOT_RANGE;
-    for (const item of list) {
+    let bestD = range;
+    for (const item of list || []) {
       const dx = item.pos.x - from.x;
       const dz = item.pos.z - from.z;
       const d = Math.sqrt(dx * dx + dz * dz);
-      if (d > SHOT_RANGE || d < 0.01) continue;
+      if (d > range || d < 0.01) continue;
       const angle = Math.atan2(-dx, -dz) - heading;
       const wrapped = Math.atan2(Math.sin(angle), Math.cos(angle));
-      if (Math.abs(wrapped) > 0.18) continue;
+      if (Math.abs(wrapped) > cone) continue;
       if (d < bestD) {
         best = item;
         bestD = d;
@@ -226,30 +335,104 @@ export function createCombat(scene, world) {
     return { target: best, dist: bestD };
   }
 
-  function shoot() {
-    if (world.mode !== 'play' || state.weapon !== 'pistol') return false;
-    if (state.ammo <= 0) {
-      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
-      return false;
-    }
-    state.ammo -= 1;
-    if (world.player) world.player.ammo = state.ammo;
-    const { from, to, heading } = aimPoint();
-    const enemyHit = targetInCone(state.enemies, from, heading);
-    const pedHit = targetInCone(world.peds, from, heading);
-    let end = to;
+  // One hitscan pellet along `heading`: nearest enemy or ped in the cone
+  // takes the hit (and the knockback, for the shotgun); otherwise the
+  // tracer runs out to max range. Returns the tracer end point.
+  function firePellet(stats, from, heading) {
+    const enemyHit = targetInCone(state.enemies, from, heading, stats.range, stats.cone);
+    const pedHit = targetInCone(world.peds, from, heading, stats.range, stats.cone);
+    let end = new THREE.Vector3(
+      from.x - Math.sin(heading) * stats.range,
+      1.4,
+      from.z - Math.cos(heading) * stats.range,
+    );
     if (enemyHit.target && (!pedHit.target || enemyHit.dist <= pedHit.dist)) {
-      damageEnemy(enemyHit.target, SHOT_DAMAGE);
+      if (stats.knockback) shoveTarget(enemyHit.target, from, stats.knockback);
+      damageEnemy(enemyHit.target, stats.damage);
       end = new THREE.Vector3(enemyHit.target.pos.x, 1.2, enemyHit.target.pos.z);
     } else if (pedHit.target) {
+      if (stats.knockback) shoveTarget(pedHit.target, from, stats.knockback);
       pedHit.target.state = 'flee';
       if (world.events) world.events.push({ type: 'crime', level: 1 });
       end = new THREE.Vector3(pedHit.target.pos.x, 1.2, pedHit.target.pos.z);
     }
     addTracer(from, end, 0xffe08a);
+    return end;
+  }
+
+  // One round from a single-shot gun (pistol, or one SMG burst round):
+  // spend one ammo, trace it, play the shot. The pistol keeps its v1
+  // behaviour exactly — dead straight, damage 25, range 60.
+  function fireGunRound(weaponName) {
+    const stats = WEAPON_STATS[weaponName];
+    if (!stats) return false;
+    if ((state.ammoByWeapon[weaponName] ?? 0) <= 0) {
+      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
+      return false;
+    }
+    state.ammoByWeapon[weaponName] -= 1;
+    syncAmmo();
+    const { from, heading } = aimPoint(stats.range);
+    const spread = weaponName === 'pistol' ? 0 : (Math.random() * 2 - 1) * stats.cone;
+    firePellet(stats, from, heading + spread);
     if (world.events) world.events.push({ type: 'gunshot' });
     if (world.audio) world.audio.shot();
     return true;
+  }
+
+  // SMG: one click starts a 3-round burst, rounds 60 ms apart. The timer
+  // lives in update(), not in setTimeout, so it follows the fixed step.
+  function startBurst() {
+    if (state.burstLeft > 0) return false; // already bursting
+    if ((state.ammoByWeapon.smg ?? 0) <= 0) {
+      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
+      return false;
+    }
+    state.burstLeft = SMG_BURST_ROUNDS;
+    state.burstTimer = 0;
+    return stepBurst();
+  }
+
+  function stepBurst() {
+    if (state.burstLeft <= 0) return false;
+    if (world.mode !== 'play') {
+      state.burstLeft = 0;
+      return false;
+    }
+    const fired = fireGunRound('smg');
+    state.burstLeft -= 1;
+    if (!fired) state.burstLeft = 0; // ran dry mid-burst: stop here
+    state.burstTimer = SMG_BURST_GAP;
+    return fired;
+  }
+
+  // Shotgun: one slow blast, 5 pellets in a spread cone, one loud shot.
+  function fireShotgunBlast() {
+    if (state.shotgunCooldown > 0) return false;
+    if ((state.ammoByWeapon.shotgun ?? 0) <= 0) {
+      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
+      return false;
+    }
+    state.ammoByWeapon.shotgun -= 1;
+    syncAmmo();
+    state.shotgunCooldown = SHOTGUN_COOLDOWN;
+    const stats = WEAPON_STATS.shotgun;
+    const { from, heading } = aimPoint(stats.range);
+    for (let i = 0; i < stats.pellets; i += 1) {
+      const spread = (Math.random() * 2 - 1) * stats.cone;
+      firePellet(stats, from, heading + spread);
+    }
+    if (world.events) world.events.push({ type: 'gunshot' });
+    if (world.audio) world.audio.shot();
+    return true;
+  }
+
+  function shoot() {
+    if (world.mode !== 'play') return false;
+    if (state.weapon === 'pistol') return fireGunRound('pistol');
+    if (state.weapon === 'smg') return startBurst();
+    if (state.weapon === 'shotgun') return fireShotgunBlast();
+    return false; // fists: F punches, clicks do nothing
   }
 
   function hurtPlayer(amount) {
@@ -282,24 +465,55 @@ export function createCombat(scene, world) {
   function update(dt) {
     updateTracers(dt);
     if (state.punchCooldown > 0) state.punchCooldown -= dt;
+    if (state.shotgunCooldown > 0) state.shotgunCooldown -= dt;
     if (world.mode !== 'play') return;
 
+    // A new mission refills every gun (missions.js also sets
+    // world.player.ammo; combat is the source of truth for its own state).
+    const missionId = world.mission ? world.mission.id : undefined;
+    if (missionId !== undefined && missionId !== state.lastMissionId) {
+      if (missionId) refillAllAmmo();
+      state.lastMissionId = missionId;
+    }
+
     // Mission 4 spawns its shooters the moment the crew is aboard.
-    if (world.mission.id === 4 && world.mission.stage >= 2 && !state.enemiesSpawned) {
+    if (missionId === 4 && world.mission.stage >= 2 && !state.enemiesSpawned) {
       spawnEnemies();
     }
-    // If the mission is over or restarted, the shooters leave with it.
-    if (world.mission.id !== 4 && state.enemies.length > 0) {
-      for (const enemy of [...state.enemies]) removeEnemy(enemy);
-      state.enemiesSpawned = false;
+    // Cleanup is per-enemy, by the mission that spawned it: the marina
+    // squad leaves when mission 4 ends, and a rival squad spawned for
+    // mission 5 or 8 stays until THAT mission ends. The old
+    // `mission.id !== 4` check cleared every enemy on any mission change,
+    // which would have wiped the 5/8 squads the moment they spawned.
+    if (world.mission && state.enemies.length > 0) {
+      const mid = world.mission.id;
+      let marinaLeft = false;
+      for (const enemy of [...state.enemies]) {
+        if (enemy.spawnMission !== mid) {
+          if (enemy.spawnMission === 4) marinaLeft = true;
+          removeEnemy(enemy);
+        }
+      }
+      if (marinaLeft && !state.enemies.some((e) => e.spawnMission === 4)) {
+        state.enemiesSpawned = false;
+      }
     }
 
     const keys = world.input ? world.input.keys : null;
-    // Fists and pistol are on-foot weapons: no punching or shooting from a car.
+    // Guns are on-foot weapons: no punching or shooting from a car.
     const onFoot = !world.player || world.player.onFoot !== false;
+    if (!onFoot) state.burstLeft = 0; // getting in a car cancels a burst
+    // Step an in-flight SMG burst BEFORE new input, so a click that starts
+    // one never fires two rounds in the same frame.
+    if (state.burstLeft > 0 && onFoot) {
+      state.burstTimer -= dt;
+      if (state.burstTimer <= 0) stepBurst();
+    }
     if (keys) {
-      if (keys.has('Digit1') || keys.has('Numpad1')) state.weapon = 'fists';
-      if (keys.has('Digit2') || keys.has('Numpad2')) state.weapon = 'pistol';
+      if (keys.has('Digit1') || keys.has('Numpad1')) switchWeapon('fists');
+      if (keys.has('Digit2') || keys.has('Numpad2')) switchWeapon('pistol');
+      if (keys.has('Digit3') || keys.has('Numpad3')) switchWeapon('smg');
+      if (keys.has('Digit4') || keys.has('Numpad4')) switchWeapon('shotgun');
       // Edge-triggered punch: only fire once per key press, not per frame.
       const fDown = keys.has('KeyF') || keys.has('Keyf');
       if (fDown && !state._fWasDown && onFoot) punch();
@@ -324,5 +538,5 @@ export function createCombat(scene, world) {
     }
   }
 
-  return { update, punch, shoot, state, hurtPlayer };
+  return { update, punch, shoot, state, hurtPlayer, spawnRivalSquad, rivalsRemaining, buyAmmo };
 }

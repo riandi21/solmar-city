@@ -17,7 +17,8 @@ const GAME_KEYS = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'ShiftLeft', 'ShiftRight', 'Space',
-  'KeyE', 'KeyF', 'Digit1', 'Digit2',
+  'KeyE', 'KeyF', 'Digit1', 'Digit2', 'Digit3', 'Digit4',
+  'KeyQ', 'KeyR', 'KeyC',
   'KeyM', 'KeyP', 'Escape', 'Enter',
 ]);
 const PAUSE_KEYS = new Set(['KeyP', 'Escape']);

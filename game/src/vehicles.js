@@ -27,6 +27,14 @@ const MAX_LATERAL_ACCEL = 9; // m/s^2, caps yaw rate at speed
 const MAX_STEER = 0.5; // rad at the wheels
 const CITY_BOUND = 275; // m, cars stop at the edge of the map
 
+// NOS boost (player car only): Shift + throttle while the tank holds
+// anything. Top speed x1.5, throttle x1.6, tank drains 0.35/s while
+// boosting and refills 0.12/s otherwise. Tank is world.player.nos, 0..1.
+const NOS_TOP_MULT = 1.5;
+const NOS_ACCEL_MULT = 1.6;
+const NOS_DRAIN = 0.35; // per second while boosting
+const NOS_REGEN = 0.12; // per second while not boosting
+
 const PAINT = [
   0xd94f3d, 0x3d7dd9, 0xe8b93c, 0x4fae5a, 0xe8e4da, 0x2b2f36,
   0x8a5fd0, 0xd97aa8, 0x3fb8a6, 0xc97b2d, 0x7a8899, 0xb8c4cc,
@@ -177,8 +185,21 @@ export function yawRate(speed, steerInput, handbrake) {
 
 export function createVehicles(scene, world) {
   if (!world.cars) world.cars = [];
+  // The NOS tank starts full; the HUD meter reads world.player.nos (0..1).
+  if (world.player && world.player.nos === undefined) world.player.nos = 1;
   const keys = () => (world.input && world.input.keys) || new Set();
   const playing = () => world.mode === undefined || world.mode === 'play';
+
+  // NOS exhaust flame: built ONCE, attached to the player car, lit only
+  // while boosting. A cone with its tip trailing behind the car (-Z).
+  const nosFlame = new THREE.Mesh(
+    new THREE.ConeGeometry(0.26, 0.85, 10),
+    new THREE.MeshBasicMaterial({ color: 0xff7b1c, transparent: true, opacity: 0.92 }),
+  );
+  nosFlame.rotation.x = -Math.PI / 2;
+  nosFlame.position.set(0, 0.55, -CAR_LENGTH / 2 - 0.35);
+  nosFlame.visible = false;
+  let nosBoosting = false; // set by drivePlayerCar, read by update() for the flame
 
   function spawnCar(kind, pos, heading, color) {
     return makeCar(scene, world, kind, pos, heading || 0, color);
@@ -193,15 +214,29 @@ export function createVehicles(scene, world) {
     const handbrake = k.has('Space');
     const steerInput = (left ? -1 : 0) + (right ? 1 : 0);
 
+    // NOS: Shift + throttle while the tank holds anything. (Shift is
+    // sprint on foot in player.js; only this code reads it in the car.)
+    const player = world.player;
+    const shift = k.has('ShiftLeft') || k.has('ShiftRight');
+    nosBoosting = !!(player && shift && fwd && (player.nos ?? 1) > 0);
+    if (player) {
+      if (player.nos === undefined || player.nos === null) player.nos = 1;
+      player.nos = nosBoosting
+        ? Math.max(0, player.nos - NOS_DRAIN * dt)
+        : Math.min(1, player.nos + NOS_REGEN * dt);
+    }
+    const topSpeed = nosBoosting ? car.maxSpeed * NOS_TOP_MULT : car.maxSpeed;
+    const accel = nosBoosting ? ACCEL * NOS_ACCEL_MULT : ACCEL;
+
     // Throttle / brake / reverse. S while rolling forward brakes; at a stop it reverses.
-    if (fwd) car.speed += ACCEL * dt;
+    if (fwd) car.speed += accel * dt;
     if (back) {
       if (car.speed > 0.5) car.speed -= BRAKE * dt;
       else car.speed -= ACCEL * 0.7 * dt;
     }
     if (!fwd && !back) car.speed -= car.speed * ROLLING_DRAG * dt;
     if (handbrake) car.speed -= car.speed * 2.2 * dt;
-    car.speed = Math.max(-REVERSE_TOP, Math.min(car.maxSpeed, car.speed));
+    car.speed = Math.max(-REVERSE_TOP, Math.min(topSpeed, car.speed));
 
     // Steering: smooth toward the held input, stronger at low speed.
     const steerTarget = steerInput * (0.55 + 0.45 * Math.min(1, Math.abs(car.speed) / 10));
@@ -307,9 +342,15 @@ export function createVehicles(scene, world) {
 
   function update(dt) {
     const capped = Math.min(dt, 0.05);
+    nosBoosting = false; // drivePlayerCar sets it again if boosting now
     if (playing()) {
       const playerCar = world.player && world.player.car;
-      if (playerCar && playerCar.active) drivePlayerCar(playerCar, capped);
+      if (playerCar && playerCar.active) {
+        drivePlayerCar(playerCar, capped);
+      } else if (world.player && typeof world.player.nos === 'number') {
+        // On foot the tank still refills, so it is full for the next chase.
+        world.player.nos = Math.min(1, world.player.nos + NOS_REGEN * capped);
+      }
       for (const car of world.cars) {
         if (!car.active) continue;
         // Travel along the nose, offset by the drift slip angle.
@@ -328,6 +369,19 @@ export function createVehicles(scene, world) {
         collideBuildings(car);
       }
       collideCars(capped);
+    }
+    // NOS flame: one mesh, re-attached if Rico swaps cars, lit only
+    // while boosting. Never rebuilt per frame.
+    try {
+      const carMesh = world.player && world.player.car && world.player.car.mesh;
+      if (nosBoosting && carMesh) {
+        if (nosFlame.parent !== carMesh) carMesh.add(nosFlame);
+        nosFlame.visible = true;
+      } else {
+        nosFlame.visible = false;
+      }
+    } catch {
+      nosFlame.visible = false;
     }
     // Mesh sync always runs, so a teleported or spawned car shows up at once.
     for (const car of world.cars) {

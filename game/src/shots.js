@@ -10,7 +10,6 @@ import * as THREE from 'three';
 const STEP = 1 / 60;
 const DRIVE_SECONDS = 7;
 const CHASE_SECONDS = 6;
-const FOOT_SECONDS = 6;
 const MISSION_SECONDS = 5;
 
 /** Where the camera and the steering should look: the car when Rico drives,
@@ -28,7 +27,7 @@ function focusHeading(world) {
 /** Call every system's update once, in world order; a missing system is skipped. */
 function stepWorld(world, dt) {
   const systems = world.systems || {};
-  const order = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat'];
+  const order = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops'];
   for (const name of order) {
     const system = systems[name];
     if (system && typeof system.update === 'function') {
@@ -147,10 +146,11 @@ export function stageShot(name, world) {
   warmUp(world, 2);
 
   if (name === 'chase') {
-    // Wanted 3, police closing in, Rico fleeing east along the main road.
+    // Wanted 4, police closing in AND the helicopter overhead: Rico flees
+    // east along the main road, the heli hanging ahead in frame.
     putPlayerInCar(world, -180, 0, Math.PI / 2);
     try {
-      if (systems.police && typeof systems.police.addWanted === 'function') systems.police.addWanted(3);
+      if (systems.police && typeof systems.police.addWanted === 'function') systems.police.addWanted(4);
     } catch (error) {
       console.warn('[shots] addWanted failed during staging', error);
     }
@@ -185,53 +185,90 @@ export function stageShot(name, world) {
     } catch (error) {
       console.warn('[shots] police spawn failed during staging', error);
     }
-    // One step to sync the new meshes, no more: the player car is already
-    // where the frame wants it.
+    // Helicopter chase: the heli must be placed AFTER the last stepWorld
+    // below — heli.update respawns an inactive heli 60 m above the player
+    // (out of the camera frame), so placing it before the step is undone.
+    // One step first, to sync the new meshes; then park the heli ~40 m
+    // ahead of the player, 14 m up — low enough to sit inside the chase
+    // camera's frame (the camera looks ~21° down, so 26 m up is above
+    // the top edge) — and run one heli.update so its spotlight cone and
+    // ground disc recompute at that altitude.
     stepWorld(world, STEP);
+    try {
+      const heli = systems.helicopter;
+      if (heli) {
+        const pos = focusPos(world);
+        const heading = focusHeading(world);
+        const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
+        const ahead = pos.clone().addScaledVector(forward, 40);
+        ahead.y = 14;
+        if (heli.pos && typeof heli.pos.set === 'function') heli.pos.set(ahead.x, ahead.y, ahead.z);
+        else heli.pos = ahead;
+        if (heli.mesh) heli.mesh.position.copy(ahead);
+        if (typeof heli.update === 'function') heli.update(STEP);
+      }
+    } catch (error) {
+      console.warn('[shots] helicopter staging failed', error);
+    }
   } else if (name === 'foot') {
-    // On foot in a busy street downtown, pedestrians around, traffic passing.
-    putPlayerOnFoot(world, 0, 58, 0);
-    if (world.input && world.input.keys) world.input.keys.add('KeyW');
-    const steps = Math.round(FOOT_SECONDS / STEP);
-    for (let i = 0; i < steps; i += 1) stepWorld(world, STEP);
-    if (world.input && world.input.keys) world.input.keys.delete('KeyW');
+    // Shop moment: Rico on foot next to the store at (58,116), facing its
+    // green-cross sign, with the buy prompt on the HUD. Warm-up already ran
+    // at the top of stageShot, so peds and traffic are around.
+    putPlayerOnFoot(world, 58, 121, Math.PI);
+    // A few steps so the shops system sees Rico in range and raises its own
+    // prompt; the explicit setPrompt below is the backup if it has not.
+    for (let i = 0; i < 30; i += 1) stepWorld(world, STEP);
+    try {
+      if (world.hud && typeof world.hud.setPrompt === 'function') {
+        world.hud.setPrompt('Q: Health $150 · R: Ammo $100');
+      }
+    } catch (error) {
+      console.warn('[shots] setPrompt failed during staging', error);
+    }
   } else if (name === 'mission') {
-    // The Marina Job: the yacht marker waits on land at the marina entrance
-    // (missions.js SPOTS.yacht, 255,160). Rico drives in from the west
-    // along road z = 174 and stops just short of it, beacon ahead in frame.
-    putPlayerInCar(world, 150, 174, Math.PI / 2);
+    // Mission 8 finale: take the Coral Club. Rico drives south on road
+    // x = 58 toward the tower, then the frame is pinned to the tower
+    // stage — marker at (58,29), rival shooters at the tower.
+    putPlayerInCar(world, 58, -120, 0);
     try {
       if (systems.missions && typeof systems.missions.startMission === 'function') {
-        systems.missions.startMission(4);
+        systems.missions.startMission(8);
       }
     } catch (error) {
       console.warn('[shots] startMission failed during staging', error);
     }
-    const stop = new THREE.Vector3(238, 0, 174);
+    const stop = new THREE.Vector3(58, 0, 10);
     const steps = Math.round(MISSION_SECONDS / STEP);
     for (let i = 0; i < steps; i += 1) {
       driveToward(world, stop);
       stepWorld(world, STEP);
-      if (focusPos(world).x >= 238) break;
+      if (focusPos(world).z >= 10) break;
     }
-    // Pin the frame to the yacht stage: marker 20 m ahead of the car, outside
-    // the 12 m arrival radius so the mission does not complete during staging.
-    // One step lets the mission system move its beacon onto the marker.
+    // Pin the frame to the tower stage: marker at the Coral Club roadside
+    // point, ~19 m ahead of the car, outside the arrival radius so the
+    // mission does not complete during staging. One step lets the mission
+    // system move its beacon onto the marker (and the combat system spawn
+    // its rival shooters for this stage, when it supports mission 8).
     if (world.mission) {
-      world.mission.id = 4;
+      world.mission.id = 8;
       world.mission.stage = 2;
-      world.mission.objective = 'Reach the yacht at the marina';
-      world.mission.marker = new THREE.Vector3(255, 2, 160);
+      world.mission.objective = 'Take the Coral Club';
+      world.mission.marker = new THREE.Vector3(58, 2, 29);
     }
     stepWorld(world, STEP);
   } else {
-    // 'drive' (and any unknown name): a clean cruise downtown, no heat.
-    putPlayerInCar(world, 0, -200, 0);
-    const target = new THREE.Vector3(0, 0, 180);
+    // 'drive' (and any unknown name): a new-district showcase — south down
+    // road x = 0 from (0,60) to (0,252), ending facing the beach and
+    // boardwalk head-on, stalls + pier + sea filling the frame. The start
+    // is far south on purpose: 7 s at ~32 m/s only covers ~200 m, so
+    // starting at z = -100 never got the car close to the boardwalk.
+    putPlayerInCar(world, 0, 60, 0);
+    const target = new THREE.Vector3(0, 0, 252);
     const steps = Math.round(DRIVE_SECONDS / STEP);
     for (let i = 0; i < steps; i += 1) {
       driveToward(world, target);
       stepWorld(world, STEP);
+      if (focusPos(world).z >= 252) break;
     }
   }
 

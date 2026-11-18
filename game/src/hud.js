@@ -54,7 +54,51 @@ export function createHud() {
     messageTimer: null,
     lastObjective: '',
     mapCtx: null,
+    lastPrompt: '',
   };
+
+  // Extra HUD nodes (NOS meter, radio station, weapon, shop prompt) are
+  // created here and appended to #hud — index.html is not rewritten for
+  // them. Guarded: with no DOM (headless tests) they simply stay null.
+  const extra = { nos: null, nosFill: null, radio: null, weapon: null, prompt: null };
+  function makeNode(id, css) {
+    if (typeof document === 'undefined') return null;
+    const found = document.getElementById(id);
+    if (found) return found;
+    const hudRoot = document.getElementById('hud');
+    if (!hudRoot) return null;
+    const node = document.createElement('div');
+    node.id = id;
+    node.className = 'hud-panel';
+    node.style.cssText = css;
+    hudRoot.appendChild(node);
+    return node;
+  }
+  extra.nos = makeNode('nos',
+    'position:absolute;right:14px;bottom:64px;width:150px;padding:7px 10px;'
+    + 'font-size:12px;color:#aab4c4;text-transform:uppercase;letter-spacing:1px;display:none;');
+  if (extra.nos) {
+    extra.nos.textContent = 'NOS';
+    const fill = document.createElement('div');
+    fill.id = 'nos-fill';
+    fill.style.cssText = 'height:8px;margin-top:4px;border-radius:4px;background:#4dc3ff;width:100%;';
+    extra.nos.appendChild(fill);
+    extra.nosFill = fill;
+  }
+  extra.radio = makeNode('radio',
+    'position:absolute;right:14px;bottom:108px;padding:7px 12px;font-size:14px;display:none;');
+  extra.weapon = makeNode('weapon',
+    'position:absolute;right:14px;top:76px;padding:7px 12px;font-size:14px;display:none;');
+  extra.prompt = makeNode('prompt',
+    'position:absolute;left:50%;bottom:160px;transform:translateX(-50%);'
+    + 'padding:8px 16px;font-size:15px;color:#ffd34d;display:none;white-space:nowrap;');
+
+  function setPrompt(text) {
+    state.lastPrompt = text || '';
+    if (!extra.prompt) return;
+    extra.prompt.textContent = state.lastPrompt;
+    extra.prompt.style.display = state.lastPrompt ? 'block' : 'none';
+  }
 
   function showMessage(text) {
     const { message } = els();
@@ -212,6 +256,43 @@ export function createHud() {
       e.speed.textContent = player.car ? `${kmh} km/h` : `${kmh} km/h on foot`;
     }
 
+    // NOS meter: only while driving. world.player.nos is 0..1 (1 = full).
+    if (extra.nos && extra.nosFill) {
+      const inCar = !!player.car;
+      extra.nos.style.display = inCar ? 'block' : 'none';
+      if (inCar) {
+        const nos = Math.max(0, Math.min(1, player.nos ?? 1));
+        extra.nosFill.style.width = `${nos * 100}%`;
+        extra.nosFill.style.background = nos > 0.25 ? '#4dc3ff' : '#ff3b30';
+      }
+    }
+    // Radio station label, bottom-right: "♪ Solmar FM".
+    if (extra.radio) {
+      let name = '';
+      try {
+        if (world.audio && typeof world.audio.stationName === 'function') {
+          name = world.audio.stationName() || '';
+        }
+      } catch {
+        name = '';
+      }
+      extra.radio.textContent = name ? `♪ ${name}` : '';
+      extra.radio.style.display = name ? 'block' : 'none';
+    }
+    // Weapon label: what Rico is holding (fists / pistol / SMG / shotgun).
+    if (extra.weapon) {
+      let weapon = '';
+      try {
+        weapon = world.systems?.combat?.state?.weapon || '';
+      } catch {
+        weapon = '';
+      }
+      const labels = { fists: 'Fists', pistol: 'Pistol', smg: 'SMG', shotgun: 'Shotgun' };
+      const shown = weapon ? (labels[weapon.toLowerCase()] || weapon) : '';
+      extra.weapon.textContent = shown;
+      extra.weapon.style.display = shown ? 'block' : 'none';
+    }
+
     // One screen visible at a time, driven by world.mode.
     setScreenVisible(e.menu, world.mode === 'menu');
     setScreenVisible(e.pause, world.mode === 'pause');
@@ -221,7 +302,7 @@ export function createHud() {
     drawMinimap(world, e.minimap);
   }
 
-  return { update, showMessage, setObjective, state };
+  return { update, showMessage, setObjective, setPrompt, state };
 }
 
 // Re-exported for tests that want the pure projection without a DOM.

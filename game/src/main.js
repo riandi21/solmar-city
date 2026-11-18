@@ -169,8 +169,10 @@ async function boot() {
   // --- Systems (each guarded: a missing one is skipped, never fatal) ---
   const cityModule = await loadModule('./city.js');
   const city = buildSystem('city', cityModule?.createCity, scene, rng);
-  if (city) world.systems.city = city;
-  else buildFallbackCity(scene);
+  if (city) {
+    world.systems.city = city;
+    world.city = city; // missions resolve district spots from the city
+  } else buildFallbackCity(scene);
 
   const playerModule = await loadModule('./player.js');
   const playerSystem = buildSystem('player', playerModule?.createPlayer, scene, world);
@@ -189,6 +191,16 @@ async function boot() {
   const police = buildSystem('police', policeModule?.createPolice, scene, world);
   if (police) world.systems.police = police;
 
+  // v2: police helicopter (4+ stars) and shops + safehouse. Both are
+  // guarded like the rest: a missing module is skipped, never fatal.
+  const heliModule = await loadModule('./heli.js');
+  const helicopter = buildSystem('helicopter', heliModule?.createHelicopter, scene, world);
+  if (helicopter) world.systems.helicopter = helicopter;
+
+  const shopsModule = await loadModule('./shops.js');
+  const shops = buildSystem('shops', shopsModule?.createShops, scene, world);
+  if (shops) world.systems.shops = shops;
+
   const missionsModule = await loadModule('./missions.js');
   const missions = buildSystem('missions', missionsModule?.createMissions, world);
   if (missions) world.systems.missions = missions;
@@ -206,6 +218,8 @@ async function boot() {
 
   const saveModule = await loadModule('./save.js');
   const save = buildSystem('save', saveModule?.createSave);
+  // Shops reach the save system through world.systems.save (safehouse save).
+  if (save) world.systems.save = save;
 
   // --- Input + audio ---
   const input = createInput(canvas);
@@ -388,7 +402,8 @@ async function boot() {
   }
 
   // --- One fixed simulation step ---
-  const stepOrder = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat'];
+  // Same order as shots.js staging, so staged scenes play identically.
+  const stepOrder = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops'];
   function stepWorld(dt) {
     for (const name of stepOrder) {
       const system = world.systems[name];
@@ -465,7 +480,7 @@ async function boot() {
       applySave(readSave());
       // Pick up where the debt left off: the next mission not yet done.
       const done = world.missionsDone || [];
-      const next = [1, 2, 3, 4].find((id) => !done.includes(id));
+      const next = [1, 2, 3, 4, 5, 6, 7, 8].find((id) => !done.includes(id));
       if (next && missions && typeof missions.startMission === 'function') {
         try {
           missions.startMission(next);
@@ -540,6 +555,7 @@ async function boot() {
   let last = performance.now();
   let prevPause = false;
   let prevMute = false;
+  let prevRadio = false;
 
   function frame(now) {
     requestAnimationFrame(frame);
@@ -565,6 +581,16 @@ async function boot() {
       showMessage(audio.muted ? 'Sound off (M to turn back on).' : 'Sound on.');
     }
     prevMute = muteDown;
+
+    // C switches the car radio station (edge-detected, play mode only).
+    const radioDown = input.any('KeyC');
+    if (radioDown && !prevRadio && world.mode === 'play') {
+      if (audio && typeof audio.nextStation === 'function') {
+        const name = audio.nextStation();
+        showMessage(name ? `Radio: ${name}` : 'Radio switched.');
+      }
+    }
+    prevRadio = radioDown;
 
     const actions = input.takeActions();
     if (actions & ACTION_CONFIRM) {

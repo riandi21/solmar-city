@@ -377,6 +377,242 @@ export function createCity(scene, rng) {
   // The big yacht at the marina — the mission-4 destination.
   makeBoat(scene, 305, 175, 0, 1.9, sailColors[3]);
 
+  // ---- Freight yard / port-industrial district (north strip) ---------------
+  // Empty ground just north of road z=-232: x -200..200, z -280..-240.
+  // The patch around (-170,-260) stays open ground for driving.
+  const containerMats = ['#c65a3a', '#3a6ec6', '#3f8f5a', '#d88a2e', '#2e9aa8'].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.25 }),
+  );
+  const craneMat = new THREE.MeshStandardMaterial({ color: '#e8b93a', roughness: 0.6, metalness: 0.4 });
+  const craneDarkMat = new THREE.MeshStandardMaterial({ color: '#3c4148', roughness: 0.7, metalness: 0.3 });
+  const warehouseMats = [
+    new THREE.MeshStandardMaterial({ color: '#7a8ba0', roughness: 0.85 }),
+    new THREE.MeshStandardMaterial({ color: '#a08a6a', roughness: 0.85 }),
+  ];
+  const roofMat = new THREE.MeshStandardMaterial({ color: '#5a5148', roughness: 0.9 });
+  function addCollider(cx, cz, w, d) {
+    colliders.push({ minX: cx - w / 2, maxX: cx + w / 2, minZ: cz - d / 2, maxZ: cz + d / 2 });
+  }
+  // Shipping-container stacks, 2-3 high; the open spot (-170,-260) is kept
+  // clear by the spacing (nearest stack centre is ~23 m away).
+  const stackSpots = [
+    [-190, -272], [-110, -272], [-30, -272], [50, -272], [130, -272],
+    [-190, -248], [-30, -248], [130, -248],
+  ];
+  for (const [sx, sz] of stackSpots) {
+    const levels = 2 + Math.floor(rng() * 2);
+    const mat = containerMats[Math.floor(rng() * containerMats.length)];
+    for (let l = 0; l < levels; l += 1) {
+      const box = new THREE.Mesh(unitBox, mat);
+      box.scale.set(6, 2.6, 2.6);
+      box.position.set(sx, 1.3 + l * 2.6, sz);
+      box.castShadow = true;
+      box.receiveShadow = true;
+      scene.add(box);
+    }
+    addCollider(sx, sz, 6, 2.6);
+  }
+  // Two gantry cranes: portal frames with a crossbeam and a hanging hook.
+  function addCrane(cx, cz) {
+    for (const [lx, lz] of [[-6, -2.5], [6, -2.5], [-6, 2.5], [6, 2.5]]) {
+      const leg = new THREE.Mesh(unitBox, craneMat);
+      leg.scale.set(1, 14, 1);
+      leg.position.set(cx + lx, 7, cz + lz);
+      leg.castShadow = true;
+      scene.add(leg);
+      addCollider(cx + lx, cz + lz, 1.2, 1.2);
+    }
+    for (const bz of [-2.5, 2.5]) {
+      const beam = new THREE.Mesh(unitBox, craneMat);
+      beam.scale.set(13.5, 1, 1.2);
+      beam.position.set(cx, 14.5, cz + bz);
+      beam.castShadow = true;
+      scene.add(beam);
+    }
+    const cable = new THREE.Mesh(unitBox, craneDarkMat);
+    cable.scale.set(0.18, 5, 0.18);
+    cable.position.set(cx, 11.5, cz);
+    scene.add(cable);
+    const hook = new THREE.Mesh(unitBox, craneDarkMat);
+    hook.scale.set(1.6, 1.6, 1.6);
+    hook.position.set(cx, 8.2, cz);
+    hook.castShadow = true;
+    scene.add(hook);
+  }
+  addCrane(-70, -260);
+  addCrane(90, -260);
+  // Two warehouses: big box + a distinct flat roof slab.
+  function addWarehouse(cx, cz, w, h, d, mat) {
+    const shed = new THREE.Mesh(unitBox, mat);
+    shed.scale.set(w, h, d);
+    shed.position.set(cx, h / 2, cz);
+    shed.castShadow = true;
+    shed.receiveShadow = true;
+    scene.add(shed);
+    const roof = new THREE.Mesh(unitBox, roofMat);
+    roof.scale.set(w + 1, 0.8, d + 1);
+    roof.position.set(cx, h + 0.4, cz);
+    roof.castShadow = true;
+    scene.add(roof);
+    addCollider(cx, cz, w, d);
+  }
+  addWarehouse(-140, -258, 24, 9, 12, warehouseMats[0]);
+  addWarehouse(150, -258, 24, 9, 12, warehouseMats[1]);
+  // Static box trucks: cab + cargo box, parked in the yard.
+  const truckCabMat = new THREE.MeshStandardMaterial({ color: '#d8d2c4', roughness: 0.6 });
+  const truckBoxMats = [
+    new THREE.MeshStandardMaterial({ color: '#c65a3a', roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: '#3a6ec6', roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: '#e8e4d8', roughness: 0.8 }),
+  ];
+  function addBoxTruck(cx, cz, heading, boxMat) {
+    const truck = new THREE.Group();
+    const cab = new THREE.Mesh(unitBox, truckCabMat);
+    cab.scale.set(2, 2.2, 2.4);
+    cab.position.set(0, 1.1, 3.4);
+    cab.castShadow = true;
+    truck.add(cab);
+    const cargo = new THREE.Mesh(unitBox, boxMat);
+    cargo.scale.set(2.4, 2.6, 4.6);
+    cargo.position.set(0, 1.3, -1);
+    cargo.castShadow = true;
+    truck.add(cargo);
+    truck.position.set(cx, 0, cz);
+    truck.rotation.y = heading;
+    scene.add(truck);
+    // Footprint along the truck's facing: ~2.6 wide, ~7.5 long.
+    const alongX = Math.abs(Math.sin(heading)) > 0.5;
+    addCollider(cx, cz, alongX ? 7.5 : 2.6, alongX ? 2.6 : 7.5);
+  }
+  addBoxTruck(-150, -246, Math.PI / 2, truckBoxMats[0]);
+  addBoxTruck(10, -274, 0, truckBoxMats[1]);
+  addBoxTruck(100, -246, -Math.PI / 2, truckBoxMats[2]);
+
+  // ---- Boardwalk district (beach, z 261..296) ------------------------------
+  const stallMats = ['#ff7f6b', '#ffd166', '#7ec8e8', '#c8e8d8', '#ffc9d6', '#d6c8f0', '#ffb08a'].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8 }),
+  );
+  const stripeTex = makeCanvas(64, 32, (ctx, w, h) => {
+    for (let i = 0; i < 8; i += 1) {
+      ctx.fillStyle = i % 2 === 0 ? '#ffffff' : '#d94f3d';
+      ctx.fillRect((i * w) / 8, 0, w / 8, h);
+    }
+  });
+  stripeTex.wrapS = THREE.RepeatWrapping;
+  stripeTex.wrapT = THREE.RepeatWrapping;
+  const awningMat = new THREE.MeshStandardMaterial({ map: stripeTex, roughness: 0.85 });
+  const stallXs = [-120, -80, -40, 0, 40, 80, 120];
+  stallXs.forEach((sx, i) => {
+    const stall = new THREE.Mesh(unitBox, stallMats[i % stallMats.length]);
+    stall.scale.set(3.4, 2.4, 3);
+    stall.position.set(sx, 1.6, 264);
+    stall.castShadow = true;
+    stall.receiveShadow = true;
+    scene.add(stall);
+    const awning = new THREE.Mesh(unitBox, awningMat);
+    awning.scale.set(3.8, 0.15, 3.6);
+    awning.position.set(sx, 2.9, 264);
+    awning.castShadow = true;
+    scene.add(awning);
+    addCollider(sx, 264, 3.4, 3);
+  });
+  // Pier jutting south from (0,296) to (0,325): planks + posts + end platform.
+  // No collider — the player can walk out onto it. Sea collider starts z=330.
+  const boardwalkPierMat = new THREE.MeshStandardMaterial({ color: PALETTE.pierWood, roughness: 0.9 });
+  const pierDeck = new THREE.Mesh(unitBox, boardwalkPierMat);
+  pierDeck.scale.set(4.5, 0.4, 29);
+  pierDeck.position.set(0, 0.35, 310.5);
+  pierDeck.castShadow = true;
+  pierDeck.receiveShadow = true;
+  scene.add(pierDeck);
+  const pierPlatform = new THREE.Mesh(unitBox, boardwalkPierMat);
+  pierPlatform.scale.set(9, 0.5, 9);
+  pierPlatform.position.set(0, 0.4, 322);
+  pierPlatform.castShadow = true;
+  pierPlatform.receiveShadow = true;
+  scene.add(pierPlatform);
+  const postGeo = new THREE.CylinderGeometry(0.18, 0.18, 2.2, 6);
+  const postSpots = [];
+  for (let z = 298; z <= 324; z += 4) {
+    postSpots.push([-2.4, z]);
+    postSpots.push([2.4, z]);
+  }
+  const pierPosts = new THREE.InstancedMesh(postGeo, pierMat, postSpots.length);
+  postSpots.forEach(([px, pz], i) => {
+    dummy.position.set(px, 0.4, pz);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    pierPosts.setMatrixAt(i, dummy.matrix);
+  });
+  scene.add(pierPosts);
+  // Ferris wheel at (-60,285): rim + spokes + cabins on a support frame.
+  // The whole wheel turns slowly; cabins counter-rotate so they stay upright.
+  const wheelMat = new THREE.MeshStandardMaterial({ color: '#ff5a7a', roughness: 0.5, metalness: 0.3 });
+  const cabinMat = new THREE.MeshStandardMaterial({ color: '#ffd166', roughness: 0.6 });
+  const supportMat = new THREE.MeshStandardMaterial({ color: '#3c4148', roughness: 0.6, metalness: 0.4 });
+  const wheelGroup = new THREE.Group();
+  wheelGroup.position.set(-60, 14, 285);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(12, 0.4, 8, 40), wheelMat);
+  rim.castShadow = true;
+  wheelGroup.add(rim);
+  const innerRim = new THREE.Mesh(new THREE.TorusGeometry(7, 0.3, 8, 32), wheelMat);
+  wheelGroup.add(innerRim);
+  const spokeGeo = new THREE.BoxGeometry(0.35, 24, 0.35);
+  for (let s = 0; s < 4; s += 1) {
+    const spoke = new THREE.Mesh(spokeGeo, supportMat);
+    spoke.rotation.z = (s * Math.PI) / 4;
+    wheelGroup.add(spoke);
+  }
+  const cabins = [];
+  for (let c = 0; c < 6; c += 1) {
+    const a = (c / 6) * Math.PI * 2;
+    const cabin = new THREE.Mesh(unitBox, cabinMat);
+    cabin.scale.set(2, 2, 2);
+    cabin.position.set(Math.cos(a) * 12, Math.sin(a) * 12, 0);
+    cabin.castShadow = true;
+    wheelGroup.add(cabin);
+    cabins.push(cabin);
+  }
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 1.6, 10), supportMat);
+  hub.rotation.x = Math.PI / 2;
+  wheelGroup.add(hub);
+  scene.add(wheelGroup);
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(unitBox, supportMat);
+    leg.scale.set(0.8, 16, 0.8);
+    leg.position.set(-60 + side * 3.4, 7, 285);
+    leg.rotation.z = -side * 0.22;
+    leg.castShadow = true;
+    scene.add(leg);
+  }
+  // String lights along the boardwalk: poles + warm glowing bulbs.
+  const stringPoleGeo = new THREE.CylinderGeometry(0.08, 0.1, 3.4, 6);
+  const stringPoleMat = new THREE.MeshStandardMaterial({ color: PALETTE.lampPost, roughness: 0.6 });
+  const bulbGeo = new THREE.SphereGeometry(0.22, 8, 6);
+  const bulbMat = new THREE.MeshStandardMaterial({
+    color: '#fff2c0',
+    emissive: '#ffdf80',
+    emissiveIntensity: 1.6,
+    roughness: 0.4,
+  });
+  const stringSpots = [];
+  for (let x = -200; x <= 200; x += 20) stringSpots.push([x, 262]);
+  const stringPoles = new THREE.InstancedMesh(stringPoleGeo, stringPoleMat, stringSpots.length);
+  const stringBulbs = new THREE.InstancedMesh(bulbGeo, bulbMat, stringSpots.length);
+  stringSpots.forEach(([x, z], i) => {
+    dummy.position.set(x, 1.7, z);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    stringPoles.setMatrixAt(i, dummy.matrix);
+    dummy.position.set(x, 3.5, z);
+    dummy.updateMatrix();
+    stringBulbs.setMatrixAt(i, dummy.matrix);
+  });
+  scene.add(stringPoles);
+  scene.add(stringBulbs);
+
   // ---- Clouds ---------------------------------------------------------------
   const cloudMat = new THREE.MeshBasicMaterial({ color: PALETTE.cloud, transparent: true, opacity: 0.92 });
   const puffGeo = new THREE.SphereGeometry(1, 10, 8);
@@ -428,14 +664,29 @@ export function createCity(scene, rng) {
     return { road: best, distance: bestDist, x: best.coord, z: Math.max(-HALF, Math.min(HALF, z)) };
   }
 
-  /** Sea shimmer + slow cloud drift; everything else in the city is static. */
+  /** Sea shimmer + slow cloud drift + ferris wheel; everything else is static. */
   function update(dt) {
     if (seaTexture) seaTexture.offset.x += dt * 0.008;
     for (const cloud of clouds) {
       cloud.position.x += dt * 2.2;
       if (cloud.position.x > 420) cloud.position.x = -420;
     }
+    // Ferris wheel turns slowly; cabins counter-rotate to stay upright.
+    wheelGroup.rotation.z += dt * 0.12;
+    for (const cabin of cabins) cabin.rotation.z = -wheelGroup.rotation.z;
   }
 
-  return { roads, colliders, update, randomRoadPos, nearestRoad, buildingCount };
+  return {
+    roads,
+    colliders,
+    update,
+    randomRoadPos,
+    nearestRoad,
+    buildingCount,
+    districts: {
+      freightYard: { x: -170, z: -260 },
+      boardwalk: { x: 0, z: 264 },
+      pier: { x: 0, z: 318 },
+    },
+  };
 }
