@@ -1,217 +1,210 @@
-// Audio for Solmar City: pure WebAudio synthesis, no audio files.
-// Engine hum, police siren, gunshots and a looping music sequencer
-// with four radio stations. M toggles mute, C changes station.
+// Solmar City audio: WebAudio synth only, no audio files. Engine hum, sirens,
+// gunshots, a bass-and-pad music loop, and six radio stations (C cycles them).
+// M toggles mute. Everything is built from oscillators and noise buffers so the
+// game ships zero network requests and zero audio assets.
+
+const STATIONS = [
+  { name: 'Coral FM', bass: [55, 55, 65.41, 49], tempo: 112, wave: 'sawtooth' },
+  { name: 'Sunset FM', bass: [49, 55, 58.27, 65.41], tempo: 96, wave: 'triangle' },
+  { name: 'Havana Heat', bass: [58.27, 65.41, 55, 73.42], tempo: 124, wave: 'square' },
+  { name: 'Neon Nights', bass: [65.41, 49, 55, 58.27], tempo: 120, wave: 'sawtooth' },
+  { name: 'Boardwalk', bass: [55, 49, 65.41, 55], tempo: 104, wave: 'triangle' },
+  { name: 'Vice Talk', bass: [49, 49, 55, 49], tempo: 88, wave: 'sine' },
+];
+
+const PAD_CHORDS = [
+  [220, 261.63, 329.63],
+  [174.61, 220, 261.63],
+  [196, 246.94, 293.66],
+  [164.81, 207.65, 246.94],
+];
+
 export function createAudio(world) {
-  const audio = {
-    ctx: null,
-    master: null,
-    musicGain: null,
-    engineOsc: null,
-    engineGain: null,
-    sirenOsc: null,
-    sirenGain: null,
-    sirenTimer: 0,
-    sirenHigh: false,
-    muted: false,
-    station: 0,
-    step: 0,
-    nextStepTime: 0,
-    started: false,
-    stations: [
-      { name: 'SOLMAR FM', bpm: 96, root: 55.0, bass: [0, 0, 7, 10, 0, 3, 7, 5], pad: [0, 3, 7, 10] },
-      { name: 'CORAL WAVE', bpm: 78, root: 49.0, bass: [0, 5, 3, 7, 0, 5, 10, 7], pad: [0, 5, 7, 12] },
-      { name: 'DOCKS BASS', bpm: 122, root: 41.2, bass: [0, 0, 0, 12, 0, 10, 7, 12], pad: [0, 7, 10, 12] },
-      { name: 'PALM NIGHT', bpm: 64, root: 65.4, bass: [0, 7, 5, 3, 0, 7, 10, 5], pad: [0, 3, 5, 7] },
-    ],
-  };
+  let ctx = null;
+  let master = null;
+  let musicGain = null;
+  let engineOsc = null;
+  let engineGain = null;
+  let sirenOscA = null;
+  let sirenOscB = null;
+  let sirenGain = null;
+  let muted = false;
+  let station = 0;
+  let stepTimer = 0;
+  let stepIndex = 0;
+  let started = false;
 
-  function ensureContext() {
-    if (audio.ctx) return true;
-    const Ctor = window.AudioContext || window.webkitAudioContext;
-    if (!Ctor) return false;
-    audio.ctx = new Ctor();
-    audio.master = audio.ctx.createGain();
-    audio.master.gain.value = audio.muted ? 0 : 0.55;
-    audio.master.connect(audio.ctx.destination);
-    audio.musicGain = audio.ctx.createGain();
-    audio.musicGain.gain.value = 0.16;
-    audio.musicGain.connect(audio.master);
-    audio.engineOsc = audio.ctx.createOscillator();
-    audio.engineOsc.type = 'sawtooth';
-    audio.engineOsc.frequency.value = 52;
-    audio.engineGain = audio.ctx.createGain();
-    audio.engineGain.gain.value = 0;
-    const engineFilter = audio.ctx.createBiquadFilter();
-    engineFilter.type = 'lowpass';
-    engineFilter.frequency.value = 420;
-    audio.engineOsc.connect(engineFilter);
-    engineFilter.connect(audio.engineGain);
-    audio.engineGain.connect(audio.master);
-    audio.engineOsc.start();
-    audio.sirenOsc = audio.ctx.createOscillator();
-    audio.sirenOsc.type = 'square';
-    audio.sirenOsc.frequency.value = 660;
-    audio.sirenGain = audio.ctx.createGain();
-    audio.sirenGain.gain.value = 0;
-    audio.sirenOsc.connect(audio.sirenGain);
-    audio.sirenGain.connect(audio.master);
-    audio.sirenOsc.start();
-    return true;
+  function ensure() {
+    if (ctx) return true;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = muted ? 0 : 0.5;
+      master.connect(ctx.destination);
+      musicGain = ctx.createGain();
+      musicGain.gain.value = 0.16;
+      musicGain.connect(master);
+      engineGain = ctx.createGain();
+      engineGain.gain.value = 0;
+      engineGain.connect(master);
+      engineOsc = ctx.createOscillator();
+      engineOsc.type = 'sawtooth';
+      engineOsc.frequency.value = 60;
+      engineOsc.connect(engineGain);
+      engineOsc.start();
+      sirenGain = ctx.createGain();
+      sirenGain.gain.value = 0;
+      sirenGain.connect(master);
+      sirenOscA = ctx.createOscillator();
+      sirenOscA.type = 'sine';
+      sirenOscA.frequency.value = 660;
+      sirenOscA.connect(sirenGain);
+      sirenOscA.start();
+      sirenOscB = ctx.createOscillator();
+      sirenOscB.type = 'sine';
+      sirenOscB.frequency.value = 880;
+      sirenOscB.connect(sirenGain);
+      sirenOscB.start();
+      started = true;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  function noteFreq(root, semitones) {
-    return root * Math.pow(2, semitones / 12);
+  function resume() {
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
   }
 
-  function playTone(freq, time, length, type, gainValue, dest) {
-    const osc = audio.ctx.createOscillator();
-    osc.type = type;
+  function noiseBurst(duration, volume, lowpass) {
+    if (!ensure()) return;
+    resume();
+    const len = Math.max(1, Math.floor(ctx.sampleRate * duration));
+    const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < len; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = volume;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = lowpass;
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(master);
+    src.start();
+  }
+
+  function blip(freq, duration, volume, type) {
+    if (!ensure()) return;
+    resume();
+    const osc = ctx.createOscillator();
+    osc.type = type || 'sine';
     osc.frequency.value = freq;
-    const gain = audio.ctx.createGain();
-    gain.gain.setValueAtTime(0, time);
-    gain.gain.linearRampToValueAtTime(gainValue, time + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.001, time + length);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
     osc.connect(gain);
-    gain.connect(dest);
-    osc.start(time);
-    osc.stop(time + length + 0.05);
+    gain.connect(master);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
   }
 
-  function scheduleStep() {
-    const station = audio.stations[audio.station];
-    const stepLen = 60 / station.bpm / 2;
-    while (audio.nextStepTime < audio.ctx.currentTime + 0.25) {
-      const t = audio.nextStepTime;
-      const bassNote = station.bass[audio.step % station.bass.length];
-      playTone(noteFreq(station.root, bassNote), t, stepLen * 1.8, 'triangle', 0.5, audio.musicGain);
-      if (audio.step % 4 === 0) {
-        for (const interval of station.pad) {
-          playTone(noteFreq(station.root * 2, interval), t, stepLen * 3.6, 'sine', 0.08, audio.musicGain);
-        }
-      }
-      if (audio.step % 2 === 1) {
-        playTone(noteFreq(station.root * 4, station.pad[audio.step % station.pad.length]), t, stepLen * 0.9, 'sine', 0.05, audio.musicGain);
-      }
-      audio.step += 1;
-      audio.nextStepTime += stepLen;
+  function playStep() {
+    if (!ctx || muted) return;
+    const st = STATIONS[station];
+    const chord = PAD_CHORDS[stepIndex % PAD_CHORDS.length];
+    const bassNote = st.bass[stepIndex % st.bass.length];
+    const osc = ctx.createOscillator();
+    osc.type = st.wave;
+    osc.frequency.value = bassNote;
+    const gain = ctx.createGain();
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.5, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
+    osc.connect(gain);
+    gain.connect(musicGain);
+    osc.start(t);
+    osc.stop(t + 0.26);
+    if (stepIndex % 2 === 0) {
+      chord.forEach((freq) => {
+        const pad = ctx.createOscillator();
+        pad.type = 'sine';
+        pad.frequency.value = freq;
+        const pg = ctx.createGain();
+        pg.gain.setValueAtTime(0.12, t);
+        pg.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+        pad.connect(pg);
+        pg.connect(musicGain);
+        pad.start(t);
+        pad.stop(t + 0.95);
+      });
     }
   }
 
-  audio.resume = function resume() {
-    if (!ensureContext()) return;
-    if (audio.ctx.state === 'suspended') audio.ctx.resume();
-    audio.started = true;
-    audio.nextStepTime = audio.ctx.currentTime + 0.1;
-  };
-
-  audio.setMuted = function setMuted(muted) {
-    audio.muted = muted;
-    if (audio.master) audio.master.gain.value = muted ? 0 : 0.55;
-  };
-
-  audio.toggleMute = function toggleMute() {
-    audio.setMuted(!audio.muted);
-    return audio.muted;
-  };
-
-  audio.cycleStation = function cycleStation() {
-    audio.station = (audio.station + 1) % audio.stations.length;
-    audio.step = 0;
-    if (world.toast) world.toast('Radio: ' + audio.stations[audio.station].name);
-    return audio.stations[audio.station].name;
-  };
-
-  audio.stationName = function stationName() {
-    return audio.stations[audio.station].name;
-  };
-
-  audio.gunshot = function gunshot() {
-    if (!ensureContext() || audio.muted) return;
-    const duration = 0.22;
-    const buffer = audio.ctx.createBuffer(1, audio.ctx.sampleRate * duration, audio.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i += 1) {
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 2.2);
-    }
-    const source = audio.ctx.createBufferSource();
-    source.buffer = buffer;
-    const filter = audio.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 1800;
-    const gain = audio.ctx.createGain();
-    gain.gain.value = 0.5;
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(audio.master);
-    source.start();
-  };
-
-  audio.beep = function beep(freq) {
-    if (!ensureContext() || audio.muted) return;
-    playTone(freq || 880, audio.ctx.currentTime, 0.12, 'sine', 0.25, audio.master);
-  };
-
-  audio.crash = function crash(hard) {
-    if (!ensureContext() || audio.muted) return;
-    const duration = hard ? 0.35 : 0.18;
-    const buffer = audio.ctx.createBuffer(1, audio.ctx.sampleRate * duration, audio.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i += 1) {
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 1.6);
-    }
-    const source = audio.ctx.createBufferSource();
-    source.buffer = buffer;
-    const filter = audio.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = hard ? 900 : 500;
-    const gain = audio.ctx.createGain();
-    gain.gain.value = hard ? 0.6 : 0.3;
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(audio.master);
-    source.start();
-    playTone(70, audio.ctx.currentTime, 0.25, 'sine', 0.4, audio.master);
-  };
-
-  audio.pickup = function pickup() {
-    if (!ensureContext() || audio.muted) return;
-    const now = audio.ctx.currentTime;
-    playTone(660, now, 0.09, 'sine', 0.2, audio.master);
-    playTone(990, now + 0.08, 0.14, 'sine', 0.2, audio.master);
-  };
-
-  audio.update = function update(dt) {
-    const input = world.input;
-    if (input && input.justPressed) {
-      if (input.justPressed.has('KeyM')) {
-        audio.toggleMute();
-        if (world.toast) world.toast(audio.muted ? 'Sound muted' : 'Sound on');
+  const audio = {
+    stations: STATIONS.map((s) => s.name),
+    get station() { return STATIONS[station].name; },
+    get muted() { return muted; },
+    ensure,
+    resume,
+    unlock() { ensure(); resume(); },
+    toggleMute() {
+      muted = !muted;
+      if (master) master.gain.value = muted ? 0 : 0.5;
+      return muted;
+    },
+    nextStation() {
+      station = (station + 1) % STATIONS.length;
+      stepIndex = 0;
+      return STATIONS[station].name;
+    },
+    setStation(index) {
+      station = ((index % STATIONS.length) + STATIONS.length) % STATIONS.length;
+      stepIndex = 0;
+      return STATIONS[station].name;
+    },
+    gunshot() { noiseBurst(0.14, 0.5, 1800); },
+    punch() { noiseBurst(0.08, 0.3, 900); },
+    crash() { noiseBurst(0.3, 0.55, 700); },
+    pickup() { blip(880, 0.12, 0.3); blip(1318, 0.18, 0.25); },
+    missionDone() {
+      blip(523.25, 0.15, 0.3);
+      setTimeout(() => blip(659.25, 0.15, 0.3), 140);
+      setTimeout(() => blip(783.99, 0.3, 0.3), 280);
+    },
+    missionFail() { blip(220, 0.4, 0.3, 'sawtooth'); },
+    siren(on) {
+      if (!ensure()) return;
+      sirenGain.gain.value = on && !muted ? 0.05 : 0;
+    },
+    update(dt) {
+      if (!ctx || !started) return;
+      const speed = world && world.player ? (world.player.speed || 0) : 0;
+      const driving = world && typeof world.player.currentVehicle === 'function'
+        ? world.player.currentVehicle() !== null
+        : speed > 0.5;
+      if (engineOsc) engineOsc.frequency.value = 50 + Math.min(speed, 60) * 2.2;
+      if (engineGain) engineGain.gain.value = driving && !muted ? 0.06 : 0;
+      const wanted = world ? (world.wanted || 0) : 0;
+      if (sirenOscA && sirenOscB) {
+        const phase = (performance.now() / 450) % 2 < 1;
+        sirenOscA.frequency.value = phase ? 660 : 880;
+        sirenOscB.frequency.value = phase ? 880 : 660;
       }
-      if (input.justPressed.has('KeyC')) {
-        if (ensureContext()) audio.cycleStation();
+      audio.siren(wanted >= 1);
+      if (muted) return;
+      stepTimer += dt;
+      const interval = 60 / STATIONS[station].tempo / 2;
+      while (stepTimer >= interval) {
+        stepTimer -= interval;
+        stepIndex += 1;
+        playStep();
       }
-    }
-    if (!audio.ctx || !audio.started) return;
-    const player = world.player || {};
-    const driving = player.car || player.bike;
-    const speed = Math.abs(player.speed || 0);
-    const targetEngine = driving ? 0.05 + Math.min(speed / 60, 1) * 0.09 : 0;
-    audio.engineGain.gain.setTargetAtTime(targetEngine, audio.ctx.currentTime, 0.1);
-    audio.engineOsc.frequency.setTargetAtTime(48 + speed * 3.2, audio.ctx.currentTime, 0.08);
-    const wanted = world.wanted || 0;
-    if (wanted >= 1 && world.mode === 'play') {
-      audio.sirenGain.gain.setTargetAtTime(0.035, audio.ctx.currentTime, 0.2);
-      audio.sirenTimer += dt;
-      if (audio.sirenTimer > 0.45) {
-        audio.sirenTimer = 0;
-        audio.sirenHigh = !audio.sirenHigh;
-        audio.sirenOsc.frequency.value = audio.sirenHigh ? 880 : 660;
-      }
-    } else {
-      audio.sirenGain.gain.setTargetAtTime(0, audio.ctx.currentTime, 0.2);
-    }
-    if (world.mode === 'play' && !audio.muted) scheduleStep();
+    },
   };
-
   return audio;
 }

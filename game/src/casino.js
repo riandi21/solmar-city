@@ -1,148 +1,162 @@
-import * as THREE from 'three';
+// casino.js — casino mini-games on the strip: slots, roulette,
+// blackjack, and the high-roller table (minimum bet $1,000, used in M38).
+// Factory: createCasino(scene, world) or createCasino(world).
+// Winnings total is tracked in world.viceState.casinoWinnings and shown
+// on the HUD. All odds are real in-game odds; nothing costs real money.
 
-// The casino on the strip: a glowing building plus a slots side game.
-// Slots are pure in-game fun — spend a little cash, spin, win a little back.
-const CASINO_POS = { x: 174, z: -116 };
-const SPIN_COST = 20;
-const SLOT_SYMBOLS = ['7', 'BAR', 'CHERRY', 'BELL', 'LEMON', 'STAR'];
-
-function readCash(world) {
-  if (world.player && typeof world.player.cash === 'number') return world.player.cash;
-  return typeof world.cash === 'number' ? world.cash : 0;
+function notify(world, text) {
+  if (!world) return;
+  if (typeof world.toast === 'function') { world.toast(text); return; }
+  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
+  if (world.hud && typeof world.hud.toast === 'function') world.hud.toast(text);
 }
 
-function addCash(world, amount) {
-  const next = readCash(world) + amount;
-  if (world.player) world.player.cash = next;
-  world.cash = next;
-  return next;
+function ensureState(world) {
+  if (!world.viceState) {
+    world.viceState = {
+      casinoRigged: false, highRollerWon: false,
+      havanaRunDone: false, viceKingCrowned: false,
+      casinoWinnings: 0, leaguePoints: 0, leagueWins: 0, nightclubIncome: 0,
+    };
+  }
+  if (typeof world.cash !== 'number') world.cash = 0;
+  return world.viceState;
 }
 
-function playerPos(world) {
-  const p = world.player && world.player.position;
-  if (!p) return null;
-  return { x: p.x, y: p.y || 0, z: p.z };
+function randInt(n) {
+  return Math.floor(Math.random() * n);
 }
 
-function toast(world, text) {
-  if (typeof world.toast === 'function') world.toast(text);
+function cardValue(cards) {
+  let total = 0;
+  let aces = 0;
+  for (const c of cards) {
+    if (c === 1) { aces += 1; total += 11; }
+    else if (c >= 10) total += 10;
+    else total += c;
+  }
+  while (total > 21 && aces > 0) { total -= 10; aces -= 1; }
+  return total;
 }
 
-function keyDown(world, code) {
-  const input = world.input;
-  if (!input) return false;
-  if (input.pressed && typeof input.pressed.has === 'function') return input.pressed.has(code);
-  if (input.keys && typeof input.keys.has === 'function') return input.keys.has(code);
-  return !!input[code];
-}
+export function createCasino(scene, world) {
+  const w = world || scene;
+  ensureState(w);
+  const state = {
+    slotsSpins: 0,
+    rouletteSpins: 0,
+    blackjackHands: 0,
+    highRollerHands: 0,
+    lastResult: null,
+  };
 
-export function createCasino(world) {
-  let spins = 0;
-  let won = 0;
-  let spent = 0;
-  let biggestWin = 0;
-  let near = false;
-  let wasNear = false;
-  let spinCooldown = 0;
-  let lastResult = null;
-  let signMesh = null;
-  let lightTimer = 0;
-
-  if (world.scene) {
-    const building = new THREE.Mesh(
-      new THREE.BoxGeometry(36, 26, 24),
-      new THREE.MeshStandardMaterial({ color: 0x7a1f5c, roughness: 0.6, metalness: 0.2 }),
-    );
-    building.position.set(CASINO_POS.x, 13, CASINO_POS.z);
-    world.scene.add(building);
-    const tower = new THREE.Mesh(
-      new THREE.BoxGeometry(14, 18, 14),
-      new THREE.MeshStandardMaterial({ color: 0xd4af37, roughness: 0.4, metalness: 0.5 }),
-    );
-    tower.position.set(CASINO_POS.x, 35, CASINO_POS.z);
-    world.scene.add(tower);
-    signMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(20, 4, 1),
-      new THREE.MeshBasicMaterial({ color: 0xff2e88 }),
-    );
-    signMesh.position.set(CASINO_POS.x, 27, CASINO_POS.z + 13);
-    world.scene.add(signMesh);
-    const doorGlow = new THREE.Mesh(
-      new THREE.PlaneGeometry(8, 6),
-      new THREE.MeshBasicMaterial({ color: 0xffd76a }),
-    );
-    doorGlow.position.set(CASINO_POS.x, 3, CASINO_POS.z + 12.2);
-    world.scene.add(doorGlow);
+  function recordWin(amount) {
+    const s = ensureState(w);
+    s.casinoWinnings += amount;
+    return s.casinoWinnings;
   }
 
-  function rollSlots() {
-    const pick = () => SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)];
-    const reels = [pick(), pick(), pick()];
+  function recordLoss(amount) {
+    const s = ensureState(w);
+    s.casinoWinnings -= amount;
+    return s.casinoWinnings;
+  }
+
+  function playSlots(bet) {
+    const stake = bet || 50;
+    if (w.cash < stake) { notify(w, 'Not enough cash for a slots spin.'); return null; }
+    w.cash -= stake;
+    state.slotsSpins += 1;
+    const reels = [randInt(7), randInt(7), randInt(7)];
     let payout = 0;
-    if (reels[0] === reels[1] && reels[1] === reels[2]) {
-      payout = reels[0] === '7' ? 200 : 100;
-    } else if (reels[0] === reels[1] || reels[1] === reels[2] || reels[0] === reels[2]) {
-      payout = 30;
-    } else if (reels.includes('STAR')) {
-      payout = 10;
-    }
-    return { reels, payout };
-  }
-
-  function spin() {
-    if (spinCooldown > 0) return null;
-    if (readCash(world) < SPIN_COST) {
-      toast(world, 'Not enough cash to spin the slots ($20).');
-      return null;
-    }
-    addCash(world, -SPIN_COST);
-    spent += SPIN_COST;
-    spins += 1;
-    const result = rollSlots();
-    lastResult = result;
-    if (result.payout > 0) {
-      addCash(world, result.payout);
-      won += result.payout;
-      const isRecord = result.payout > biggestWin;
-      if (isRecord) biggestWin = result.payout;
-      toast(world, `Slots: ${result.reels.join(' | ')} — you win $${result.payout}!${isRecord && result.payout >= 100 ? ' New biggest win!' : ''}`);
-    } else {
-      toast(world, `Slots: ${result.reels.join(' | ')} — no luck this time.`);
-    }
-    if (Array.isArray(world.events)) {
-      world.events.push({ type: 'casino-spin', payout: result.payout, reels: result.reels });
-    }
-    spinCooldown = 0.8;
+    // Three of a kind pays 10x; a pair pays 2x; three 7s pay a 25x jackpot.
+    if (reels[0] === 6 && reels[1] === 6 && reels[2] === 6) payout = stake * 25;
+    else if (reels[0] === reels[1] && reels[1] === reels[2]) payout = stake * 10;
+    else if (reels[0] === reels[1] || reels[1] === reels[2] || reels[0] === reels[2]) payout = stake * 2;
+    w.cash += payout;
+    const net = payout - stake;
+    if (net > 0) recordWin(net); else if (net < 0) recordLoss(-net);
+    const result = { game: 'slots', bet: stake, reels, payout, net };
+    state.lastResult = result;
+    notify(w, payout > 0 ? 'Slots: [' + reels.join(' ') + '] — you win $' + payout + '!' : 'Slots: [' + reels.join(' ') + '] — no win.');
     return result;
   }
 
-  function update(dt) {
-    spinCooldown = Math.max(0, spinCooldown - dt);
-    lightTimer += dt;
-    if (signMesh) {
-      // The neon sign pulses gently so the casino reads at a glance.
-      const pulse = 0.75 + Math.sin(lightTimer * 3) * 0.25;
-      signMesh.material.color.setRGB(1 * pulse, 0.18 * pulse, 0.53 * pulse);
-    }
-    const p = playerPos(world);
-    if (!p) return;
-    const d = Math.hypot(CASINO_POS.x - p.x, CASINO_POS.z - p.z);
-    near = d < 16;
-    if (near && !wasNear) {
-      toast(world, 'Solmar Casino — press G to play the slots ($20 a spin).');
-    }
-    wasNear = near;
-    if (near && keyDown(world, 'KeyG')) {
-      spin();
-    }
+  function playRoulette(bet, pick) {
+    const stake = bet || 100;
+    if (w.cash < stake) { notify(w, 'Not enough cash for a roulette bet.'); return null; }
+    const chosen = typeof pick === 'number' ? pick : randInt(37);
+    w.cash -= stake;
+    state.rouletteSpins += 1;
+    const ball = randInt(37);
+    const rigged = !!(w.viceState && w.viceState.casinoRigged);
+    // Rigged wheel (M37): the ball favours Rico's number.
+    const landed = rigged && Math.random() < 0.5 ? chosen : ball;
+    const won = landed === chosen;
+    const payout = won ? stake * 35 : 0;
+    w.cash += payout;
+    const net = payout - stake;
+    if (net > 0) recordWin(net); else if (net < 0) recordLoss(-net);
+    const result = { game: 'roulette', bet: stake, pick: chosen, landed, payout, net, won };
+    state.lastResult = result;
+    notify(w, won ? 'Roulette: ball lands on ' + landed + ' — you win $' + payout + '!' : 'Roulette: ball lands on ' + landed + ', not ' + chosen + '.');
+    return result;
   }
 
-  return {
-    update,
-    spin,
-    isNear() { return near; },
-    getPosition() { return { ...CASINO_POS }; },
-    getStats() { return { spins, won, spent, biggestWin, lastResult }; },
-    getSpinCost() { return SPIN_COST; },
+  function playBlackjack(bet, standAt) {
+    const stake = bet || 100;
+    if (w.cash < stake) { notify(w, 'Not enough cash for blackjack.'); return null; }
+    w.cash -= stake;
+    state.blackjackHands += 1;
+    const player = [randInt(13) + 1, randInt(13) + 1];
+    const dealer = [randInt(13) + 1, randInt(13) + 1];
+    const stopAt = typeof standAt === 'number' ? standAt : 17;
+    while (cardValue(player) < stopAt) player.push(randInt(13) + 1);
+    while (cardValue(dealer) < 17) dealer.push(randInt(13) + 1);
+    const pv = cardValue(player);
+    const dv = cardValue(dealer);
+    let payout = 0;
+    if (pv > 21) payout = 0;
+    else if (dv > 21 || pv > dv) payout = stake * 2;
+    else if (pv === dv) payout = stake;
+    w.cash += payout;
+    const net = payout - stake;
+    if (net > 0) recordWin(net); else if (net < 0) recordLoss(-net);
+    const result = { game: 'blackjack', bet: stake, player, dealer, playerValue: pv, dealerValue: dv, payout, net };
+    state.lastResult = result;
+    notify(w, 'Blackjack: you ' + pv + ', dealer ' + dv + (payout > stake ? ' — you win $' + (payout - stake) + '!' : payout === stake ? ' — push.' : ' — dealer wins.'));
+    return result;
+  }
+
+  function playHighRoller(bet, game) {
+    const stake = bet || 1000;
+    if (stake < 1000) { notify(w, 'High-roller table: minimum bet $1,000.'); return null; }
+    if (w.cash < stake) { notify(w, 'Not enough cash for the high-roller table.'); return null; }
+    state.highRollerHands += 1;
+    const kind = game || 'blackjack';
+    if (kind === 'roulette') return playRoulette(stake, randInt(37));
+    // High-roller blackjack uses a luckier shoe for the story beat (M38).
+    const result = playBlackjack(stake, 18);
+    if (result) result.highRoller = true;
+    return result;
+  }
+
+  const api = {
+    name: 'casino',
+    state,
+    playSlots,
+    playRoulette,
+    playBlackjack,
+    playHighRoller,
+    winnings() { return ensureState(w).casinoWinnings; },
+    update(dt) {
+      // Casino games are event-driven (player presses a key at a table);
+      // update only keeps the winnings total in sync with the vice state.
+      ensureState(w);
+    },
   };
+  if (Array.isArray(w.systems)) w.systems.push(api);
+  return api;
 }
+
+export default createCasino;
