@@ -1,13 +1,11 @@
-# Solmar City v4 — hand-in output and local clutter
 out/
-output/
-.DS_Store
+dist/
 node_modules/
 *.log
-*.orig
-*.tmp
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
+*.tmp

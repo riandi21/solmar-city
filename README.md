@@ -1,78 +1,55 @@
 # Solmar City
 
-[![Solmar City on make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
-[![Solmar City rank on make.fun](https://make.fun/badge/gta6-01/riandi21/solmar-city/rank.svg)](https://make.fun/bounty/gta6-01)
-[![Solmar City reward on make.fun](https://make.fun/badge/gta6-01/riandi21/solmar-city/reward.svg)](https://make.fun/bounty/gta6-01)
+Solmar City is an original sun-soaked coastal open-world crime game, built
+with three.js and plain static files — no network requests, no build step.
+Open `game/index.html` in a desktop browser and play.
 
+You are Rico Vega, a driver-for-hire who owes $5,000 to Madame Coral. Steal
+cars, outrun the Solmar PD through a five-star wanted system, take on 24
+story missions, and settle the score with the Dourado cartel in the
+Dourado Revenge arc: tail their courier, raid their warehouse, ambush
+their convoy, and storm the Don's penthouse.
 
-A neon open-world crime game that runs offline in a desktop browser.
-Three.js, no build step, no network requests — just open `game/index.html`.
+## What is in the city
 
-## The story
+- A 9×9-block coastal city: downtown towers, Old Town and its lighthouse,
+  the marina and its yacht, the boardwalk and ferris wheel, the airfield,
+  the casino strip — and the new Docks district with its container yard,
+  warehouses and gantry cranes.
+- Driving with NOS boost and handbrake drifts, plus motorcycles with
+  wheelies, a bike shop, and drivable marina boats.
+- Traffic that overtakes and yields, pedestrians that flee, police cars
+  that flank, roadblocks and spike strips, and a helicopter at four stars.
+- Missions, street races (including a race through the Docks container
+  rows), taxi jobs, 20 hidden packages, shops, a safehouse, and the
+  Casino Heist arc.
+- Properties to buy for passive income, and six territories to control
+  and defend against rival gangs.
+- A full day/night cycle, rain and fog, a WebAudio synth soundtrack with
+  four radio stations, and a HUD with a live minimap.
 
-Rico Vega came back to Solmar City with nothing but a busted sedan and a
-debt: **$5,000 owed to Madame Coral**, and she does not wait. Run her
-sixteen jobs — chases, heists, races, the harbor war — earn the cash, and
-buy your way out before the city eats you.
+## Run it
 
-## The city
+Serve the game locally and open it in a desktop browser:
 
-- A 522×522 m grid city: downtown towers, the Casino Strip, the marina and
-  its yacht, the Old Town and lighthouse, the boardwalk pier, and the
-  airfield in the north-east.
-- Day/night cycle, weather, traffic, pedestrians, police who chase, and a
-  police helicopter that joins the hunt when the heat rises.
-- Boats in the marina basin, a plane job at the airfield, slots at the
-  casino, taxi fares, street races, and hidden packages to collect.
+```sh
+node serve.ts
+# then open http://localhost:8080
+```
 
-## Systems
+To hand the entry in, run the entrypoint with an output directory:
 
-- **16 missions** — a full story arc from Rico's first errand for Madame
-  Coral to the Harbor War finale.
-- **Driving & NOS** — traffic cars, handbrake turns, NOS boost, police
-  pursuits with wanted stars.
-- **Combat** — five weapons (pistol, SMG, shotgun, rifle, sniper) with
-  ammo, armor, and health.
-- **Economy** — cash from jobs, fares, races and slots; spend it at the
-  street shop (health, ammo, rifle ammo, NOS, armor) or rest at the
-  safehouse ($300: save, heal, clear your wanted level).
-- **Audio** — fully synthesized WebAudio: engine hum that follows your
-  speed, two-tone police sirens, gunshots, and four radio stations
-  (C to change, M to mute).
-- **HUD & minimap** — cash, health/armor bars, wanted stars, objective,
-  speed, clock, district name, mission tracker, and a live minimap.
-- **Saves** — progress persists in localStorage (`solmar-city-v4`).
+```sh
+mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+```
 
 ## Controls
 
-| Keys | Action |
-| --- | --- |
-| WASD / Arrows | Move / drive |
-| Shift | Sprint on foot / NOS boost while driving |
-| Space | Jump on foot / handbrake while driving |
-| E | Enter / exit car or boat |
-| F | Punch |
-| 1–5 | Weapons |
-| C | Radio station |
-| M | Mute |
-| P / Esc | Pause (saves) |
-| N | Skip to night |
-| R | Race |
-| Y | Taxi |
-| Q | Slots |
-| H / J / K / L / U | Shop buys (near the shop): health $150, ammo $100, rifle ammo $150, NOS $80, armor $250 |
-| T | Safehouse $300 (near the safehouse) |
+WASD move / drive · Shift sprint / NOS / wheelie · Space jump · E enter
+or exit a vehicle · F punch · Click shoot · Right-click sniper zoom ·
+1–5 swap weapons · C radio · M mute · B buy a property · P pause.
 
-## Screenshots
+## Entry
 
-The dossier shots are scripted scenarios, reproducible with
-`?shot=chase`, `?shot=drive`, `?shot=foot` or `?shot=mission` — each runs
-240 fixed simulation steps and signals readiness with
-`window.__shotReady` and the page title `SHOT READY`. The four shots map
-to `shots.json` in order: 1-chase, 2-drive, 3-foot, 4-mission.
-
-## Hand-in
-
-`node main.ts` copies `game/` and `screenshots/` to the output directory
-(`MAKEFUN_OUTPUT_DIR`, else `/output`) and writes `dossier.json` with the
-kit's `buildDossier`.
+This game was built for the make.fun GTA 6 bounty:
+https://make.fun/bounty/gta6-01
