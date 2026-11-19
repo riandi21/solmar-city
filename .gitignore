@@ -1,11 +1,12 @@
 out/
-dist/
 node_modules/
-*.log
 .DS_Store
-Thumbs.db
+*.log
+*.swp
+*.swo
+*~
 .vscode/
 .idea/
-*.swp
-*~
-*.tmp
+# Local playtest captures and temp output stay out of the repo.
+screenshots/*.tmp
+tmp/

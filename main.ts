@@ -1,58 +1,57 @@
-// Solmar City — make.fun gta6-01 entry point (Node 22, standard library only).
+// Solmar City hand-in (Node 22, standard library only): the game is this
+// directory's game/ folder — plain static files a desktop browser loads
+// offline (game/index.html and its ES modules, three.js vendored under
+// game/vendor/, no network request) — and this program hands it in. It copies
+// game/ and screenshots/ from beside this file to /output and writes
+// /output/dossier.json, the summary the judge reads, with the vendored
+// make.fun library. The game itself is an open-world crime game: Rico Vega,
+// 44 story missions, a 9x9 city with Sunset Beach, the marina, the airfield
+// and the islands, cars, bikes, boats, jet skis, a seaplane and a flyable
+// helicopter, police with wanted levels, Heat and cartel threat, crew,
+// properties, territories, an empire, fishing, casino games and street races.
 //
-// This program hands the game in. It takes the static game/ folder and the
-// screenshots/ folder sitting next to this file, copies both into the
-// output directory, and writes dossier.json there using the vendored
-// make.fun library, which summarises the game for the judge.
-//
-// The output directory comes from MAKEFUN_OUTPUT_DIR, falling back to
-// /output (the grader's directory). Run it locally like this:
+// Serve it locally with `node serve.ts`, then open http://localhost:8080.
+// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-// and serve the game itself with `node serve.ts`, then open
-// http://localhost:8080 to play it in a desktop browser.
 
 import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const repoRoot = fileURLToPath(new URL('.', import.meta.url));
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-const gameOut = join(outputDir, 'game');
-const shotsOut = join(outputDir, 'screenshots');
+const here = fileURLToPath(new URL('.', import.meta.url));
+const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-// Count plain files and their bytes under a directory, recursively.
-function countTree(dir: string): { files: number; bytes: number } {
+function countTree(dir) {
   let files = 0;
   let bytes = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const child = countTree(path);
-      files += child.files;
-      bytes += child.bytes;
-    } else if (entry.isFile()) {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const info = statSync(path);
+    if (info.isDirectory()) {
+      const sub = countTree(path);
+      files += sub.files;
+      bytes += sub.bytes;
+    } else {
       files += 1;
-      bytes += statSync(path).size;
+      bytes += info.size;
     }
   }
   return { files, bytes };
 }
 
-mkdirSync(outputDir, { recursive: true });
-cpSync(join(repoRoot, 'game'), gameOut, { recursive: true });
-mkdirSync(shotsOut, { recursive: true });
-if (existsSync(join(repoRoot, 'screenshots'))) {
-  cpSync(join(repoRoot, 'screenshots'), shotsOut, { recursive: true });
-}
+mkdirSync(out, { recursive: true });
+cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
+mkdirSync(join(out, 'screenshots'), { recursive: true });
+if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
 
-// The caps are the scorer's own limits: at most 4 screenshots of 256 KiB
-// each, at most 993 files / 48 MiB in game/, paths under 1000 bytes, and
-// the dossier text capped at 160 KiB. An entry over a cap is refused,
-// so the build refuses it here first.
+// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
+// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
+// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
+// screenshots/ and dossier.json).
 writeFileSync(
-  join(outputDir, 'dossier.json'),
-  buildDossier(outputDir, {
+  join(out, 'dossier.json'),
+  buildDossier(out, {
     text_max_bytes: 163840,
     screenshots: { max: 4, max_bytes: 262144 },
     game_max_files: 993,
@@ -61,12 +60,16 @@ writeFileSync(
   }),
 );
 
-const gameTotals = countTree(gameOut);
-const dossierPath = join(outputDir, 'dossier.json');
-const dossierBytes = statSync(dossierPath).size;
-const shotCount = existsSync(shotsOut)
-  ? readdirSync(shotsOut).filter((name) => !name.startsWith('.')).length
+const gameStats = countTree(join(here, 'game'));
+const shotDir = join(here, 'screenshots');
+const shotCount = existsSync(shotDir)
+  ? readdirSync(shotDir).filter((n) => !n.startsWith('.')).length
+  : 0;
+const shotBytes = existsSync(shotDir)
+  ? readdirSync(shotDir)
+      .filter((n) => !n.startsWith('.'))
+      .reduce((sum, n) => sum + statSync(join(shotDir, n)).size, 0)
   : 0;
 console.log(
-  `Hand-in: game ${gameTotals.files} files, ${gameTotals.bytes} bytes; screenshots ${shotCount}; dossier ${dossierBytes} bytes`,
+  `HAND-IN Solmar City: game files ${gameStats.files} (${gameStats.bytes} bytes), screenshots ${shotCount} (${shotBytes} bytes)`,
 );

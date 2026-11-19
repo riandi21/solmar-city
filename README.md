@@ -1,55 +1,64 @@
 # Solmar City
 
-Solmar City is an original sun-soaked coastal open-world crime game, built
-with three.js and plain static files — no network requests, no build step.
-Open `game/index.html` in a desktop browser and play.
+[![make.fun](https://img.shields.io/badge/make.fun-gta6--01-blue)](https://make.fun/c/gta6-01)
+[![Solmar City](https://img.shields.io/badge/game-Solmar%20City-gold)](https://make.fun/c/gta6-01)
+[![Open World](https://img.shields.io/badge/open--world-44%20missions-green)](https://make.fun/c/gta6-01)
 
-You are Rico Vega, a driver-for-hire who owes $5,000 to Madame Coral. Steal
-cars, outrun the Solmar PD through a five-star wanted system, take on 24
-story missions, and settle the score with the Dourado cartel in the
-Dourado Revenge arc: tail their courier, raid their warehouse, ambush
-their convoy, and storm the Don's penthouse.
+An original sun-soaked coastal open-world crime game, built with three.js.
+Nothing here is from any commercial game: the city, the names, the
+characters, the story, the art and the music are all our own.
 
-## What is in the city
+## The story
 
-- A 9×9-block coastal city: downtown towers, Old Town and its lighthouse,
-  the marina and its yacht, the boardwalk and ferris wheel, the airfield,
-  the casino strip — and the new Docks district with its container yard,
-  warehouses and gantry cranes.
-- Driving with NOS boost and handbrake drifts, plus motorcycles with
-  wheelies, a bike shop, and drivable marina boats.
-- Traffic that overtakes and yields, pedestrians that flee, police cars
-  that flank, roadblocks and spike strips, and a helicopter at four stars.
-- Missions, street races (including a race through the Docks container
-  rows), taxi jobs, 20 hidden packages, shops, a safehouse, and the
-  Casino Heist arc.
-- Properties to buy for passive income, and six territories to control
-  and defend against rival gangs.
-- A full day/night cycle, rain and fog, a WebAudio synth soundtrack with
-  four radio stations, and a HUD with a live minimap.
+Rico Vega, Don of the Coral empire, is one crown away from ruling Solmar
+City. The last rival cartel is moving shipments through the Docks and the
+Havana routes — and Rico is going to shut them down, defend his tower,
+protect his informant, and take the Kingpin crown at the airfield.
 
-## Run it
+## The world
 
-Serve the game locally and open it in a desktop browser:
+A 9x9 city grid with downtown towers, Old Town, the marina, the boardwalk,
+the Docks, the freight yard, the airfield, the casino strip, North Hills,
+the Vineyards, Little Havana, the offshore Islands — and the new Sunset
+Beach resort district, home of the Surf Shack and the jet ski dock. The
+beach bars, bonfire pit, volleyball court and wooden pier make Sunset
+Beach the place to be at dusk, when the Lowriders come out and the
+hydraulics start bouncing.
 
-```sh
-node serve.ts
-# then open http://localhost:8080
-```
+## What you can do
 
-To hand the entry in, run the entrypoint with an output directory:
-
-```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-```
+- **44 story missions** across 11 arcs: the opening jobs, the Dourado arc,
+  the Harbor War, the Airport Job, the Casino Heist, Dourado Revenge, the
+  Coral Crown, the Solmar Legacy, the Don's Gambit, the Vice King — and the
+  Kingpin finale (M41 The Shipment, M42 The Informant, M43 The Siege,
+  M44 The Kingpin).
+- **Drive anything**: cars (including a hydraulics Lowrider and an armored
+  limo), motorcycles, boats, jet skis, a seaplane and a flyable helicopter.
+- **Fight**: punch, pistol, SMG, shotgun, rifle and sniper; gang shooters,
+  federal agents and cartel hitmen who flank and take cover; crew allies
+  who fight beside you.
+- **Stay ahead of the law**: a 5-star wanted system with chasing police,
+  roadblocks and spike strips, a flanking police AI, police helicopters —
+  plus a separate federal Heat meter and a cartel threat meter that sends
+  hit squads after you.
+- **Build an empire**: 6 buyable properties, 6 territories to control,
+  protection money, crew posted to districts, passive income.
+- **Play around**: street races and a racing league, taxi jobs, 20 hidden
+  packages, casino slots / roulette / blackjack, and a fishing mini-game
+  at the Sunset Beach and marina piers.
+- **Live in the city**: a full day/night cycle, rain and fog, 6 radio
+  stations (including the new beachy Sunset FM), and a WebAudio synth
+  soundtrack — no audio files, everything is generated.
 
 ## Controls
 
-WASD move / drive · Shift sprint / NOS / wheelie · Space jump · E enter
-or exit a vehicle · F punch · Click shoot · Right-click sniper zoom ·
-1–5 swap weapons · C radio · M mute · B buy a property · P pause.
+WASD move/drive · E enter or exit a vehicle (car, bike, boat, seaplane,
+helicopter, jet ski) · F punch · Click shoot · Right-click sniper zoom ·
+Shift NOS boost / bike wheelie · H Lowrider hydraulics · C radio · M mute ·
+P pause/resume · B buy property · G garage menu.
 
-## Entry
+## Play it
 
-This game was built for the make.fun GTA 6 bounty:
-https://make.fun/bounty/gta6-01
+Serve `game/` with any static server (`node serve.ts`, then open
+http://localhost:8080) and play in desktop Chrome. No network requests:
+every script, the three.js library and every asset are files under `game/`.
