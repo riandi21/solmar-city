@@ -1,214 +1,167 @@
+// Solmar City — weather: rain and fog events, storms at night, wet grip.
+// Rain cuts driving grip; fog shortens view distance. The state lives on
+// world.weather (plain data); the system object goes into world.systems.
 import * as THREE from 'three';
 
-// Weather: rain and fog events, with night storms. Rain is a visible
-// particle sheet around the player, fog thickens the scene fog, and rain
-// cuts driving grip (read by the vehicles system through world.weatherGrip).
-// Storms only roll in at night and add lightning flashes.
-export function createWeather(world) {
-  const scene = world.scene;
-  const camera = world.camera;
+const RAIN_DROPS = 500;
+const RAIN_AREA = 90;
+const RAIN_HEIGHT = 45;
 
-  const DRY_GRIP = 1.0;
-  const RAIN_GRIP = 0.68;
-  const STORM_GRIP = 0.58;
-
-  let state = 'clear'; // clear | rain | fog | storm
-  let stateTime = 0; // seconds left in the current event (0 = indefinite clear)
-  let nextEventIn = 45 + Math.random() * 60;
-  let fogTarget = 0; // 0..1 how foggy it should be
-  let fogAmount = 0; // smoothed fog amount actually applied
-  let rainAmount = 0; // smoothed 0..1
-  let lightningTimer = 0;
-  let flash = 0; // 0..1 lightning flash brightness, decays fast
-  let announced = false;
-
-  world.weatherGrip = DRY_GRIP;
-  world.weather = world.weather || 'clear';
-
-  // Keep the scene fog object around so we can thicken it; create a light
-  // one if the renderer never made one.
-  if (!scene.fog) {
-    scene.fog = new THREE.Fog(0xa8c6e2, 220, 900);
+function resolveArgs(scene, world) {
+  if (!world) {
+    world = scene;
+    scene = (world && world.scene) || null;
   }
-  const baseFogNear = scene.fog.near;
-  const baseFogFar = scene.fog.far;
+  return { scene, world };
+}
 
-  // --- rain: 1,200 streaks in a box that follows the camera
-  const RAIN_COUNT = 1200;
-  const rainPos = new Float32Array(RAIN_COUNT * 3);
-  const rainSpeed = new Float32Array(RAIN_COUNT);
-  for (let i = 0; i < RAIN_COUNT; i++) {
-    rainPos[i * 3] = (Math.random() - 0.5) * 120;
-    rainPos[i * 3 + 1] = Math.random() * 60;
-    rainPos[i * 3 + 2] = (Math.random() - 0.5) * 120;
-    rainSpeed[i] = 34 + Math.random() * 22;
+function rngOf(world) {
+  const r = world.rng;
+  if (typeof r === 'function') return r;
+  if (r && typeof r.next === 'function') return () => r.next();
+  return Math.random;
+}
+
+export function createWeather(scene, world) {
+  ({ scene, world } = resolveArgs(scene, world));
+  if (!world) throw new Error('createWeather needs a world');
+  if (!Array.isArray(world.systems)) world.systems = [];
+  world.systemObjects = world.systemObjects || {};
+  const rng = rngOf(world);
+
+  const state = {
+    kind: 'clear', // clear | rain | fog | storm
+    rain: 0, // 0-1 current rain intensity (smoothed)
+    fog: 0, // 0-1 current fog amount (smoothed)
+    grip: 1, // driving grip multiplier: 1 dry, 0.72 in rain
+    storm: false,
+    lightning: 0, // 0-1 flash brightness; spikes during a storm
+    targetRain: 0,
+    targetFog: 0,
+  };
+  world.weather = state;
+  world.grip = 1;
+
+  const hasScene = scene && typeof scene.add === 'function';
+  let rainPoints = null;
+  let rainMat = null;
+  let rainPos = null;
+  let rainVel = null;
+
+  if (hasScene) {
+    rainPos = new Float32Array(RAIN_DROPS * 3);
+    rainVel = new Float32Array(RAIN_DROPS);
+    for (let i = 0; i < RAIN_DROPS; i += 1) {
+      rainPos[i * 3] = (rng() - 0.5) * RAIN_AREA;
+      rainPos[i * 3 + 1] = rng() * RAIN_HEIGHT;
+      rainPos[i * 3 + 2] = (rng() - 0.5) * RAIN_AREA;
+      rainVel[i] = 28 + rng() * 14;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+    rainMat = new THREE.PointsMaterial({ color: 0xaec6e8, size: 0.35, transparent: true, opacity: 0 });
+    rainPoints = new THREE.Points(geo, rainMat);
+    rainPoints.visible = false;
+    scene.add(rainPoints);
+    if (!scene.fog) scene.fog = new THREE.Fog(0xa8c4de, 120, 900);
   }
-  const rainGeo = new THREE.BufferGeometry();
-  rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
-  const rainMat = new THREE.PointsMaterial({
-    color: 0xaac8e8, size: 0.35, transparent: true, opacity: 0,
-    depthWrite: false,
-  });
-  const rain = new THREE.Points(rainGeo, rainMat);
-  rain.visible = false;
-  rain.frustumCulled = false;
-  scene.add(rain);
 
-  // --- lightning: a brief sky flash from a high directional light
-  const flashLight = new THREE.DirectionalLight(0xdfe8ff, 0);
-  flashLight.position.set(120, 300, -80);
-  scene.add(flashLight);
+  let changeTimer = 55 + rng() * 60; // seconds until the next weather roll
 
-  function setState(next, duration) {
-    state = next;
-    stateTime = duration || 0;
-    world.weather = next;
-    announced = false;
-    if (next === 'rain') {
-      fogTarget = 0.35;
-    } else if (next === 'fog') {
-      fogTarget = 1;
-    } else if (next === 'storm') {
-      fogTarget = 0.55;
+  function isNight() {
+    if (world.daynight && typeof world.daynight.isNight === 'boolean') return world.daynight.isNight;
+    if (world.isNight !== undefined) return !!world.isNight;
+    return false;
+  }
+
+  function setWeather(kind) {
+    if (kind === 'rain') {
+      state.kind = 'rain';
+      state.targetRain = 0.85;
+      state.targetFog = 0.15;
+      state.storm = false;
+    } else if (kind === 'fog') {
+      state.kind = 'fog';
+      state.targetRain = 0;
+      state.targetFog = 0.9;
+      state.storm = false;
+    } else if (kind === 'storm') {
+      state.kind = 'storm';
+      state.targetRain = 1;
+      state.targetFog = 0.45;
+      state.storm = true;
     } else {
-      fogTarget = 0;
+      state.kind = 'clear';
+      state.targetRain = 0;
+      state.targetFog = 0;
+      state.storm = false;
     }
   }
 
-  function startRain(duration) {
-    setState('rain', duration || 50 + Math.random() * 40);
-  }
-
-  function startFog(duration) {
-    setState('fog', duration || 60 + Math.random() * 40);
-  }
-
-  function startStorm(duration) {
-    setState('storm', duration || 45 + Math.random() * 30);
-    lightningTimer = 1 + Math.random() * 3;
+  function startRain() {
+    setWeather('rain');
   }
 
   function clear() {
-    setState('clear', 0);
-    nextEventIn = 60 + Math.random() * 90;
+    setWeather('clear');
   }
 
   function isRaining() {
-    return state === 'rain' || state === 'storm';
+    return state.rain > 0.25;
   }
 
-  function getGrip() {
-    return world.weatherGrip;
-  }
-
-  // Visibility 1 (clear) to ~0.2 (pea-soup fog), for the HUD and for
-  // systems that care how far anyone can see (police, helicopter).
-  function getVisibility() {
-    return 1 - fogAmount * 0.8;
-  }
-
-  function getFogAmount() {
-    return fogAmount;
-  }
-
-  function getRainAmount() {
-    return rainAmount;
-  }
-
-  function pickEvent() {
-    const night = world.night === true ||
-      (world.dayNight && world.dayNight.isNight && world.dayNight.isNight());
-    const roll = Math.random();
-    if (night && roll < 0.3) {
-      startStorm();
-    } else if (roll < 0.55) {
-      startRain();
-    } else {
-      startFog();
-    }
+  function rollWeather() {
+    const roll = rng();
+    if (roll < 0.55) setWeather('clear');
+    else if (roll < 0.78) setWeather('rain');
+    else if (roll < 0.92) setWeather('fog');
+    else if (isNight()) setWeather('storm');
+    else setWeather('rain');
+    changeTimer = 50 + rng() * 90;
   }
 
   function update(dt) {
-    // Schedule: events roll in on their own while the game runs.
-    if (world.mode === 'play') {
-      if (state === 'clear') {
-        nextEventIn -= dt;
-        if (nextEventIn <= 0) pickEvent();
-      } else if (stateTime > 0) {
-        stateTime -= dt;
-        if (stateTime <= 0) {
-          setState('clear', 0);
-          nextEventIn = 70 + Math.random() * 110;
+    if (!dt || dt <= 0) return;
+    if (world.mode === 'pause' || world.mode === 'over') return;
+    changeTimer -= dt;
+    if (changeTimer <= 0) rollWeather();
+    // Smooth transitions so rain/fog fade in and out instead of snapping.
+    const k = Math.min(1, dt * 0.5);
+    state.rain += (state.targetRain - state.rain) * k;
+    state.fog += (state.targetFog - state.fog) * k;
+    state.grip = 1 - state.rain * 0.28;
+    world.grip = state.grip;
+    // Storm lightning: a random flash every few seconds, decaying fast.
+    if (state.storm && rng() < dt * 0.35) state.lightning = 1;
+    else state.lightning = Math.max(0, state.lightning - dt * 2.5);
+    if (!hasScene) return;
+    const px = world.player && world.player.position ? world.player.position.x : 0;
+    const pz = world.player && world.player.position ? world.player.position.z : 0;
+    if (rainPoints) {
+      rainPoints.visible = state.rain > 0.03;
+      rainMat.opacity = state.rain * 0.75;
+      rainPoints.position.set(px, 0, pz);
+      for (let i = 0; i < RAIN_DROPS; i += 1) {
+        rainPos[i * 3 + 1] -= rainVel[i] * dt;
+        if (rainPos[i * 3 + 1] < 0) {
+          rainPos[i * 3 + 1] = RAIN_HEIGHT;
+          rainPos[i * 3] = (rng() - 0.5) * RAIN_AREA;
+          rainPos[i * 3 + 2] = (rng() - 0.5) * RAIN_AREA;
         }
       }
+      rainPoints.geometry.attributes.position.needsUpdate = true;
     }
-
-    if (!announced && state !== 'clear' && world.events) {
-      world.events.push({ type: 'weather', weather: state });
-      announced = true;
-    }
-
-    // Smooth the rain and fog amounts toward their targets.
-    const rainTarget = isRaining() ? 1 : 0;
-    rainAmount += (rainTarget - rainAmount) * Math.min(1, dt * 1.6);
-    fogAmount += (fogTarget - fogAmount) * Math.min(1, dt * 0.8);
-
-    // Grip: slick roads while it rains, worst in a storm.
-    const gripTarget = state === 'storm' ? STORM_GRIP : state === 'rain' ? RAIN_GRIP : DRY_GRIP;
-    world.weatherGrip += (gripTarget - world.weatherGrip) * Math.min(1, dt * 2);
-
-    // Fog density: pull the far plane in as fog thickens.
     if (scene.fog) {
-      scene.fog.near = baseFogNear * (1 - fogAmount * 0.55);
-      scene.fog.far = baseFogFar * (1 - fogAmount * 0.78);
+      // Fog closes in: near plane pulls closer as fog thickens.
+      scene.fog.near = 140 - state.fog * 105;
+      scene.fog.far = 900 - state.fog * 620;
     }
-
-    // Rain particles: fall, recycle to the top, follow the camera.
-    if (rainAmount > 0.02 && camera) {
-      rain.visible = true;
-      rainMat.opacity = rainAmount * 0.75;
-      rain.position.set(camera.position.x, 0, camera.position.z);
-      const arr = rainGeo.attributes.position.array;
-      for (let i = 0; i < RAIN_COUNT; i++) {
-        arr[i * 3 + 1] -= rainSpeed[i] * dt;
-        arr[i * 3] += dt * 6; // slight wind slant
-        if (arr[i * 3 + 1] < 0) {
-          arr[i * 3 + 1] = 55 + Math.random() * 5;
-          arr[i * 3] = (Math.random() - 0.5) * 120;
-          arr[i * 3 + 2] = (Math.random() - 0.5) * 120;
-        }
-      }
-      rainGeo.attributes.position.needsUpdate = true;
-    } else {
-      rain.visible = false;
-    }
-
-    // Lightning: random strikes during storms, flash decays in ~0.15 s.
-    if (state === 'storm') {
-      lightningTimer -= dt;
-      if (lightningTimer <= 0) {
-        flash = 0.9 + Math.random() * 0.6;
-        lightningTimer = 3 + Math.random() * 7;
-      }
-    }
-    flash = Math.max(0, flash - dt * 6);
-    flashLight.intensity = flash * 5;
   }
 
-  return {
-    update,
-    startRain,
-    startFog,
-    startStorm,
-    clear,
-    isRaining,
-    getGrip,
-    getVisibility,
-    getFogAmount,
-    getRainAmount,
-    getState: () => state,
-    isStorming: () => state === 'storm',
-    isFoggy: () => state === 'fog',
-    rain,
-  };
+  const system = { name: 'weather', state, update, setWeather, startRain, clear, isRaining, rollWeather };
+  world.systems.push(system);
+  world.systemObjects.weather = system;
+  return system;
 }
+
+export default createWeather;

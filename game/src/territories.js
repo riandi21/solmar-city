@@ -1,210 +1,184 @@
-// Territories: six districts Rico can win over, earn from, and defend.
-// Control runs 0-100 per district. Missions and activities raise it; a
-// district above 60 is controlled — it pays rent and posts a lookout who
-// marks nearby police. Rival gangs strike back at controlled turf.
-const DISTRICT_DEFS = [
-  { name: 'Downtown', x: 0, z: 0, income: 120 },
-  { name: 'Old Town', x: -203, z: -58, income: 90 },
-  { name: 'Marina', x: 300, z: 160, income: 150 },
-  { name: 'Boardwalk', x: 0, z: 285, income: 110 },
-  { name: 'Freight Yard', x: -185, z: -225, income: 80 },
-  { name: 'Airfield', x: 200, z: -200, income: 140 },
-];
+// Territories — district control for Solmar City.
+// Six districts, control 0-100. Missions and activities in a district
+// raise control; a controlled district (>60) pays passive income and
+// spawns a friendly lookout who marks nearby police on the minimap.
+// Rival gangs periodically attack a controlled district: defeat the
+// squad or lose 20 control. Control persists in the save.
+import * as THREE from 'three';
 
-const CONTROLLED_AT = 60;
-const ATTACK_LOSS = 20;
-const SECONDS_PER_HOUR = 60;
-const ATTACK_EVERY_MIN = 100;
-const ATTACK_EVERY_MAX = 170;
+export const DISTRICTS = ['Downtown', 'Old Town', 'Marina', 'Boardwalk', 'Freight Yard', 'Airfield'];
 
-function readCash(world) {
-  if (world.player && typeof world.player.cash === 'number') return world.player.cash;
-  return typeof world.cash === 'number' ? world.cash : 0;
-}
+const DISTRICT_CENTERS = {
+  Downtown: { x: 0, z: 0 },
+  'Old Town': { x: -203, z: -58 },
+  Marina: { x: 320, z: 160 },
+  Boardwalk: { x: 0, z: 264 },
+  'Freight Yard': { x: -170, z: -260 },
+  Airfield: { x: 200, z: -230 },
+};
+const INCOME = { Downtown: 150, 'Old Town': 100, Marina: 130, Boardwalk: 110, 'Freight Yard': 80, Airfield: 120 };
 
-function addCash(world, amount) {
-  const next = readCash(world) + amount;
-  if (world.player) world.player.cash = next;
-  world.cash = next;
-  return next;
-}
-
-function playerPos(world) {
-  const p = world.player && world.player.position;
-  if (!p) return null;
-  return { x: p.x, y: p.y || 0, z: p.z };
-}
-
-function toast(world, text) {
-  if (typeof world.toast === 'function') world.toast(text);
-}
-
-function pushEvent(world, event) {
-  if (Array.isArray(world.events)) world.events.push(event);
-}
-
-export function createTerritories(world) {
-  if (!world.territories || typeof world.territories !== 'object') {
-    world.territories = { control: {}, income: 0, lookouts: {}, attacks: [] };
+export function createTerritories(scene, world) {
+  const w = world || {};
+  if (!w.territories || typeof w.territories !== 'object' || Array.isArray(w.territories)) {
+    w.territories = { control: {}, income: 0, attackTimers: {}, lookouts: {} };
   }
-  const state = world.territories;
-  if (!state.control || typeof state.control !== 'object') state.control = {};
-  if (typeof state.income !== 'number') state.income = 0;
-  if (!state.lookouts || typeof state.lookouts !== 'object') state.lookouts = {};
-  if (!Array.isArray(state.attacks)) state.attacks = [];
-
-  for (const def of DISTRICT_DEFS) {
-    if (typeof state.control[def.name] !== 'number') state.control[def.name] = 0;
-    if (typeof state.lookouts[def.name] !== 'boolean') {
-      state.lookouts[def.name] = state.control[def.name] > CONTROLLED_AT;
-    }
+  const t = w.territories;
+  if (!t.control || typeof t.control !== 'object') t.control = {};
+  if (!t.attackTimers || typeof t.attackTimers !== 'object') t.attackTimers = {};
+  if (!t.lookouts || typeof t.lookouts !== 'object') t.lookouts = {};
+  for (const d of DISTRICTS) {
+    if (typeof t.control[d] !== 'number') t.control[d] = 0;
+    if (typeof t.attackTimers[d] !== 'number') t.attackTimers[d] = 90 + Math.random() * 120;
   }
-
-  let hourTimer = 0;
-  let attackTimer = ATTACK_EVERY_MIN + Math.random() * 40;
-  let attack = null; // { district, attackers, timer }
+  if (typeof t.income !== 'number') t.income = 0;
+  const state = { underAttack: null, attackSquad: [] };
+  if (!w.territoryState) w.territoryState = state;
 
   function districtAt(x, z) {
-    let best = DISTRICT_DEFS[0];
-    let bestD = Infinity;
-    for (const d of DISTRICT_DEFS) {
-      const dd = (d.x - x) * (d.x - x) + (d.z - z) * (d.z - z);
+    let best = 'Downtown'; let bestD = Infinity;
+    for (const d of DISTRICTS) {
+      const c = DISTRICT_CENTERS[d];
+      const dd = Math.hypot(x - c.x, z - c.z);
       if (dd < bestD) { bestD = dd; best = d; }
     }
-    return best.name;
+    return best;
   }
 
-  function isControlled(name) {
-    return (state.control[name] || 0) > CONTROLLED_AT;
-  }
-
-  function gainControl(name, amount) {
-    if (!(name in state.control)) return 0;
-    const before = state.control[name];
-    const after = Math.max(0, Math.min(100, before + amount));
-    state.control[name] = after;
-    if (before <= CONTROLLED_AT && after > CONTROLLED_AT) {
-      state.lookouts[name] = true;
-      toast(world, `${name} is yours now — a lookout is watching the streets for police.`);
-      pushEvent(world, { type: 'territory-controlled', district: name });
+  function raiseControl(district, amount) {
+    if (!DISTRICTS.includes(district)) return t.control[district];
+    const before = t.control[district];
+    t.control[district] = Math.min(100, before + amount);
+    if (before <= 60 && t.control[district] > 60) {
+      spawnLookout(district);
+      if (typeof w.toast === 'function') w.toast(`${district} is now under your control — lookout posted.`);
     }
-    if (before > CONTROLLED_AT && after <= CONTROLLED_AT) {
-      state.lookouts[name] = false;
-      toast(world, `You lost control of ${name}.`);
-    }
-    return after;
+    return t.control[district];
   }
 
-  function payHourlyIncome() {
-    let total = 0;
-    const paid = [];
-    for (const def of DISTRICT_DEFS) {
-      if (isControlled(def.name)) {
-        total += def.income;
-        paid.push(def.name);
+  function lowerControl(district, amount) {
+    if (!DISTRICTS.includes(district)) return;
+    t.control[district] = Math.max(0, t.control[district] - amount);
+    if (t.control[district] <= 60 && t.lookouts[district]) removeLookout(district);
+  }
+
+  function spawnLookout(district) {
+    const c = DISTRICT_CENTERS[district];
+    let mesh = null;
+    if (scene) {
+      mesh = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(0.7, 1.1, 0.4),
+        new THREE.MeshStandardMaterial({ color: 0x2e7d32 }),
+      );
+      body.position.y = 1.0;
+      mesh.add(body);
+      mesh.position.set(c.x + 6, 0, c.z + 6);
+      scene.add(mesh);
+    }
+    t.lookouts[district] = { district, position: { x: c.x + 6, y: 0, z: c.z + 6 }, mesh, friendly: true };
+    if (!Array.isArray(w.lookouts)) w.lookouts = [];
+    w.lookouts.push(t.lookouts[district]);
+    return t.lookouts[district];
+  }
+
+  function removeLookout(district) {
+    const l = t.lookouts[district];
+    if (l && l.mesh && l.mesh.parent) l.mesh.parent.remove(l.mesh);
+    if (Array.isArray(w.lookouts)) {
+      const i = w.lookouts.indexOf(l);
+      if (i >= 0) w.lookouts.splice(i, 1);
+    }
+    delete t.lookouts[district];
+  }
+
+  // A lookout marks nearby police on the minimap for its district.
+  function lookoutMarksPolice(district) {
+    if (!t.lookouts[district]) return [];
+    const c = DISTRICT_CENTERS[district];
+    const cars = Array.isArray(w.cars) ? w.cars.filter((car) => car && car.kind === 'police') : [];
+    return cars.filter((car) => car.position && Math.hypot(car.position.x - c.x, car.position.z - c.z) < 120);
+  }
+
+  function startAttack(district) {
+    const c = DISTRICT_CENTERS[district];
+    state.underAttack = district;
+    state.attackSquad = [];
+    const combat = w.systemObjects && w.systemObjects.combat;
+    for (let i = 0; i < 3; i += 1) {
+      if (combat && typeof combat.spawnShooter === 'function') {
+        state.attackSquad.push(combat.spawnShooter(c.x + (i - 1) * 4, c.z + 8, { kind: 'gang' }));
+      } else {
+        const s = { kind: 'gang', position: { x: c.x + (i - 1) * 4, y: 0, z: c.z + 8 }, health: 60, alive: true };
+        state.attackSquad.push(s);
+        if (!Array.isArray(w.enemies)) w.enemies = [];
+        w.enemies.push(s);
       }
     }
-    if (total > 0) {
-      addCash(world, total);
-      state.income += total;
-      toast(world, `Territory income: +$${total} (${paid.join(', ')}).`);
-      pushEvent(world, { type: 'territory-income', amount: total, districts: paid });
+    // A posted crew member fights the attackers, so the squad is weaker.
+    const posted = w.empire && w.empire.posts ? Object.values(w.empire.posts).filter((p) => p === district).length : 0;
+    if (posted > 0 && state.attackSquad.length > 0) {
+      const weak = state.attackSquad[0];
+      weak.health = Math.max(10, weak.health - 30);
     }
-  }
-
-  function startAttack() {
-    const controlled = DISTRICT_DEFS.filter((d) => isControlled(d.name));
-    if (controlled.length === 0 || attack) return false;
-    const target = controlled[Math.floor(Math.random() * controlled.length)];
-    attack = { district: target.name, attackers: 4, timer: 60 };
-    state.attacks.push({ district: target.name, startedAt: world.elapsed || 0 });
-    toast(world, `WARNING: a rival gang is hitting ${target.name}! Get there and drive them off.`);
-    pushEvent(world, { type: 'territory-attack', district: target.name, attackers: 4 });
-    return true;
+    if (typeof w.toast === 'function') w.toast(`Rival gang is attacking ${district}! Defend it or lose 20 control.`);
+    t.attackTimers[district] = 150 + Math.random() * 120;
+    return state.attackSquad;
   }
 
   function resolveAttack(won) {
-    if (!attack) return false;
-    const district = attack.district;
-    if (won) {
-      toast(world, `${district} defended! The gang scattered.`);
-      pushEvent(world, { type: 'territory-defended', district });
-      gainControl(district, 5);
-    } else {
-      gainControl(district, -ATTACK_LOSS);
-      toast(world, `${district} was overrun — you lost ${ATTACK_LOSS} control.`);
-      pushEvent(world, { type: 'territory-lost', district, loss: ATTACK_LOSS });
-    }
-    attack = null;
-    return true;
+    const district = state.underAttack;
+    if (!district) return;
+    if (!won) lowerControl(district, 20);
+    else if (typeof w.toast === 'function') w.toast(`${district} defended!`);
+    state.underAttack = null;
+    state.attackSquad = [];
   }
 
-  // Called by combat when a rival attacker goes down near the player.
-  function attackerDown() {
-    if (!attack) return 0;
-    attack.attackers -= 1;
-    if (attack.attackers <= 0) resolveAttack(true);
-    return attack.attackers;
+  function hourlyIncome() {
+    let total = 0;
+    for (const d of DISTRICTS) if (t.control[d] > 60) total += INCOME[d];
+    return total;
+  }
+  function controlledDistricts() {
+    return DISTRICTS.filter((d) => t.control[d] > 60);
+  }
+  function totalControl() {
+    return DISTRICTS.reduce((sum, d) => sum + t.control[d], 0);
   }
 
   function update(dt) {
-    // Gains arrive on the shared events queue from missions and activities.
-    // Mark each event once applied instead of removing it, so the HUD and
-    // other systems can still read it this frame.
-    if (Array.isArray(world.events)) {
-      for (const ev of world.events) {
-        if (!ev || ev._territoryApplied) continue;
-        if ((ev.type === 'mission-complete' || ev.type === 'activity-complete') && ev.district) {
-          gainControl(ev.district, ev.amount || 5);
-          ev._territoryApplied = true;
-        }
-      }
+    if (w.mode !== 'play') return;
+    // Passive income accrues per in-game hour.
+    const hourFrac = dt / 3600;
+    const income = hourlyIncome() * hourFrac;
+    if (income > 0) {
+      t.income += income;
+      w.cash = (w.cash || 0) + income;
     }
-
-    hourTimer += dt;
-    if (hourTimer >= SECONDS_PER_HOUR) {
-      hourTimer -= SECONDS_PER_HOUR;
-      payHourlyIncome();
+    // Rival attacks on controlled districts.
+    for (const d of DISTRICTS) {
+      if (t.control[d] <= 60) continue;
+      t.attackTimers[d] -= dt;
+      if (t.attackTimers[d] <= 0 && !state.underAttack) startAttack(d);
     }
-
-    // Rival gangs probe controlled turf on a slow timer.
-    if (!attack) {
-      attackTimer -= dt;
-      if (attackTimer <= 0) {
-        attackTimer = ATTACK_EVERY_MIN + Math.random() * (ATTACK_EVERY_MAX - ATTACK_EVERY_MIN);
-        startAttack();
-      }
-    } else {
-      attack.timer -= dt;
-      // Fighting on home turf wears the squad down faster.
-      const p = playerPos(world);
-      if (p) {
-        const def = DISTRICT_DEFS.find((d) => d.name === attack.district);
-        if (def && Math.hypot(def.x - p.x, def.z - p.z) < 90) {
-          attack.timer -= dt * 0.5;
-        }
-      }
-      if (attack.timer <= 0) resolveAttack(false);
+    if (state.underAttack) {
+      const alive = state.attackSquad.filter((s) => s && s.alive !== false && (s.health === undefined || s.health > 0));
+      const stillListed = state.attackSquad.filter((s) => !Array.isArray(w.enemies) || w.enemies.includes(s));
+      if (alive.length === 0 || stillListed.length === 0) resolveAttack(true);
     }
   }
 
-  return {
-    update,
-    districts: DISTRICT_DEFS,
-    districtAt,
-    gainControl,
-    isControlled,
-    getControl(name) { return state.control[name] || 0; },
-    getAllControl() { return { ...state.control }; },
-    getIncome() { return state.income; },
-    getHourlyIncome() {
-      return DISTRICT_DEFS.filter((d) => isControlled(d.name))
-        .reduce((s, d) => s + d.income, 0);
-    },
-    hasLookout(name) { return !!state.lookouts[name]; },
-    getAttack() { return attack; },
-    startAttack,
-    resolveAttack,
-    attackerDown,
+  const api = {
+    update, raiseControl, lowerControl, districtAt, spawnLookout, removeLookout,
+    lookoutMarksPolice, startAttack, resolveAttack, hourlyIncome,
+    controlledDistricts, totalControl,
+    districts: DISTRICTS, centers: DISTRICT_CENTERS, income: INCOME,
+    get control() { return t.control; },
+    get underAttack() { return state.underAttack; },
   };
+  if (Array.isArray(w.systems)) w.systems.push(api);
+  return api;
 }
+
+export default createTerritories;
