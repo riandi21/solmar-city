@@ -1,611 +1,470 @@
-// Combat for Solmar City — fists, pistol, SMG, shotgun, rifle, and the rival
-// gang shooters who show up for the Marina Job (mission 4) and the
-// arc-2 squad fights (missions 5 and 8) and the Harbor War (mission 12).
-//
-// Controls: keys 1 / 2 / 3 / 4 / 5 switch fists / pistol / SMG / shotgun /
-// rifle, F punches, left mouse click shoots while a gun is armed. The SMG
-// fires a 3-round burst per click; the shotgun fires 5 pellets with a slow
-// cooldown; the rifle fires one heavy long-range round with a slow bolt.
-// Ammo is kept per weapon (pistol 24, SMG 90, shotgun 12, rifle 30) and
-// refilled at the start of every mission; world.player.ammo always
-// mirrors the CURRENT weapon's ammo (0 for fists).
-//
-// The player has 100 health and slowly regains it after 10 quiet seconds.
-// At 0 health the run ends: world.mode becomes 'over' and main.js shows
-// the game-over screen.
-//
-// Enemies are simple hitscan shooters: they stand near the marina, fire
-// at the player every couple of seconds, and usually miss. Hitting a
-// pedestrian is a crime — it raises the wanted level through the shared
-// events queue, which the police system reads.
-//
-// Shared state touched (see BUILD-NOTES.md):
-//   world.player.health / .ammo / .pos / .heading, world.mode, world.time
-//   world.input.keys (Set of KeyboardEvent.code strings) and .clicked
-//   world.events — {type:'crime',level:1}, {type:'gunshot'}, {type:'player-dead'}
-//   world.audio?.shot() / .punch() — optional sound hooks
-//   world.mission.id / .stage — mission 4 stage 2 spawns the shooters
+// Combat — punching and shooting for Solmar City.
+// Punch (F, on foot only) knocks back nearby pedestrians and enemies.
+// Shooting is hitscan on click: pistol, SMG (3-round burst), shotgun
+// (5 pellets), rifle, and sniper rifle (long range, scope zoom on
+// right-click). Digit keys switch weapons; ammo is tracked per weapon.
+// Ammo is SCARCE: it refills only at shops and on mission start —
+// never free in the field. Rival gang shooters spawn for later missions,
+// take cover behind cars and buildings, and flank instead of standing
+// in the open. Communicates only through the shared world object.
 import * as THREE from 'three';
 
-export const PISTOL_AMMO = 24;
-export const SMG_AMMO = 90;
-export const SMG_DAMAGE = 12;
-export const SMG_RANGE = 45;
-export const SHOTGUN_AMMO = 12;
-export const SHOTGUN_DAMAGE = 10; // per pellet
-export const SHOTGUN_RANGE = 25;
-export const SHOTGUN_PELLETS = 5;
-export const SHOTGUN_COOLDOWN = 0.9; // seconds between shotgun blasts
-export const RIFLE_AMMO = 30;
-export const RIFLE_DAMAGE = 40;
-export const RIFLE_RANGE = 120;
-export const RIFLE_COOLDOWN = 1.1; // seconds between rifle shots
-export const ARMOR_ABSORB = 0.5; // share of a hit the vest soaks up
-export const ARMOR_DURABILITY = 100;
-export const PLAYER_MAX_HEALTH = 100;
-export const ENEMY_HEALTH = 50;
-export const PUNCH_RANGE = 2; // metres
-export const PUNCH_DAMAGE = 25;
-export const SHOT_DAMAGE = 25;
-export const SHOT_RANGE = 60;
-export const REGEN_DELAY = 10; // seconds without being hit before regen
-export const REGEN_RATE = 5; // health per second
-
-// Full magazine per gun; the shop and the mission-start refill use these.
-const WEAPON_AMMO = { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO, rifle: RIFLE_AMMO };
-// Per-weapon firing behaviour. The pistol keeps its v1 numbers exactly.
-// The rifle is the long-range option: a tight cone, one heavy round,
-// and a slow bolt between shots — it reaches across the pier, but it
-// punishes a miss.
-const WEAPON_STATS = {
-  pistol: { damage: SHOT_DAMAGE, range: SHOT_RANGE, cone: 0.18, pellets: 1, knockback: 0 },
-  smg: { damage: SMG_DAMAGE, range: SMG_RANGE, cone: 0.3, pellets: 1, knockback: 0 },
-  shotgun: { damage: SHOTGUN_DAMAGE, range: SHOTGUN_RANGE, cone: 0.38, pellets: SHOTGUN_PELLETS, knockback: 4 },
-  rifle: { damage: RIFLE_DAMAGE, range: RIFLE_RANGE, cone: 0.06, pellets: 1, knockback: 2 },
+const WEAPONS = {
+  pistol: { name: 'Pistol', damage: 34, range: 55, rate: 0.28, spread: 0.03, pellets: 1, magSize: 12, startAmmo: 60, zoom: 1 },
+  smg: { name: 'SMG', damage: 16, range: 45, rate: 0.09, spread: 0.07, pellets: 1, burst: 3, magSize: 30, startAmmo: 90, zoom: 1 },
+  shotgun: { name: 'Shotgun', damage: 14, range: 22, rate: 0.85, spread: 0.16, pellets: 5, magSize: 6, startAmmo: 24, zoom: 1 },
+  rifle: { name: 'Rifle', damage: 42, range: 90, rate: 0.14, spread: 0.02, pellets: 1, magSize: 30, startAmmo: 90, zoom: 1 },
+  sniper: { name: 'Sniper', damage: 95, range: 180, rate: 1.1, spread: 0.004, pellets: 1, magSize: 5, startAmmo: 15, zoom: 3 },
 };
-const SMG_BURST_ROUNDS = 3;
-const SMG_BURST_GAP = 0.06; // seconds (60 ms) between burst rounds
+const WEAPON_KEYS = {
+  Digit1: 'pistol',
+  Digit2: 'smg',
+  Digit3: 'shotgun',
+  Digit4: 'rifle',
+  Digit5: 'sniper',
+};
+const PUNCH_RANGE = 2.4;
+const PUNCH_DAMAGE = 25;
+const PUNCH_KNOCKBACK = 6;
+const SHOOTER_HEALTH = 100;
+const SHOOTER_FIRE_INTERVAL = 1.4;
+const SHOOTER_HIT_CHANCE = 0.22;
 
-const PUNCH_COOLDOWN = 0.4;
-const ENEMY_SHOT_MIN = 1.2; // seconds between enemy shots
-const ENEMY_SHOT_MAX = 2.2;
-const ENEMY_HIT_CHANCE = 0.25; // rivals are bad shots on purpose
-const ENEMY_HIT_DAMAGE = 8;
-
-function distXZ(a, b) {
-  const dx = a.x - b.x;
-  const dz = a.z - b.z;
-  return Math.sqrt(dx * dx + dz * dz);
-}
-
-function makeShooterMesh() {
-  // Dark-red jacket, easy to tell apart from street peds at a glance.
+function buildShooterMesh() {
   const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.75, 0.95, 0.42),
-    new THREE.MeshBasicMaterial({ color: 0x8a1a1a }),
-  );
+  const jacket = new THREE.MeshStandardMaterial({ color: 0x8a2a1e, roughness: 0.7 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc9976b, roughness: 0.6 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c22, roughness: 0.7 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 0.9, 4, 8), jacket);
   body.position.y = 1.05;
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 10, 8),
-    new THREE.MeshBasicMaterial({ color: 0xd9a066 }),
-  );
-  head.position.y = 1.78;
-  const legs = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.7, 0.35),
-    new THREE.MeshBasicMaterial({ color: 0x1a1a1a }),
-  );
-  legs.position.y = 0.35;
-  const gun = new THREE.Mesh(
-    new THREE.BoxGeometry(0.08, 0.08, 0.5),
-    new THREE.MeshBasicMaterial({ color: 0x111111 }),
-  );
-  gun.position.set(0.3, 1.25, 0.25);
   group.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 10), skin);
+  head.position.y = 1.95;
   group.add(head);
-  group.add(legs);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.31, 0.33, 0.14, 12), dark);
+  cap.position.y = 2.18;
+  group.add(cap);
+  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.12, 0.12), dark);
+  gun.position.set(0.3, 1.25, 0.35);
   group.add(gun);
   return group;
 }
 
-export function createCombat(scene, world) {
-  const state = {
-    weapon: 'fists', // 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle'
-    ammo: 0, // the CURRENT weapon's ammo; fists carry none
-    ammoByWeapon: { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO, rifle: RIFLE_AMMO },
-    enemies: [], // { mesh, pos, health, shootTimer, squad, spawnMission }
-    enemiesSpawned: false,
-    lastMissionId: world.mission ? world.mission.id : 0,
-    lastHitAt: -Infinity,
-    punchCooldown: 0,
-    shotgunCooldown: 0,
-    rifleCooldown: 0,
-    burstLeft: 0, // SMG burst rounds still to fire
-    burstTimer: 0, // seconds until the next burst round
-    tracers: [], // { line, life } — fade out fast
-  };
-  if (world.player) world.player.ammo = 0;
-  // v3 armour: the shop's vest lives here as durability (100 = fresh).
-  // hurtPlayer() spends it to soak half of every hit until it breaks.
-  if (world.player && world.player.armor === undefined) world.player.armor = 0;
+export function createCombat(world) {
+  world.systems = world.systems || {};
+  world.events = world.events || [];
+  world.player = world.player || {};
+  world.peds = world.peds || [];
+  world.cars = world.cars || [];
+  world.gangShooters = world.gangShooters || [];
+  world.city = world.city || {};
+  if (!world.player.ammo) {
+    world.player.ammo = {};
+    for (const key of Object.keys(WEAPONS)) world.player.ammo[key] = WEAPONS[key].startAmmo;
+  }
+  if (!world.player.weapon) world.player.weapon = 'pistol';
+  if (typeof world.player.armor !== 'number') world.player.armor = 0;
+  if (typeof world.player.scopeZoom !== 'number') world.player.scopeZoom = 1;
 
-  // --- tracers ------------------------------------------------------------
-  function addTracer(from, to, color) {
-    const geo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(from.x, from.y, from.z),
-      new THREE.Vector3(to.x, to.y, to.z),
-    ]);
-    const line = new THREE.Line(
-      geo,
-      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+  const shooters = world.gangShooters;
+  const tracers = [];
+  let fireCooldown = 0;
+  let burstLeft = 0;
+  let burstTimer = 0;
+  let fWasDown = false;
+  let lastMissionId = world.mission ? world.mission.id : null;
+  let lastWeapon = world.player.weapon;
+
+  function playerPos() {
+    return world.player.position || new THREE.Vector3(0, 0, 0);
+  }
+
+  function aimDirection() {
+    const heading = world.player.heading || 0;
+    const spreadJitter = (Math.random() - 0.5) * 2;
+    const weapon = WEAPONS[world.player.weapon] || WEAPONS.pistol;
+    const jitter = weapon.spread * spreadJitter;
+    return new THREE.Vector3(Math.sin(heading + jitter), 0, Math.cos(heading + jitter));
+  }
+
+  function spawnTracer(from, to) {
+    if (!world.scene) return;
+    const length = from.distanceTo(to);
+    const tracer = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.06, length),
+      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.9 })
     );
-    scene.add(line);
-    state.tracers.push({ line, life: 0.09 });
+    tracer.position.copy(from).lerp(to, 0.5);
+    tracer.lookAt(to);
+    world.scene.add(tracer);
+    tracers.push({ mesh: tracer, age: 0 });
   }
 
   function updateTracers(dt) {
-    for (let i = state.tracers.length - 1; i >= 0; i -= 1) {
-      const t = state.tracers[i];
-      t.life -= dt;
-      t.line.material.opacity = Math.max(0, t.life / 0.09) * 0.9;
-      if (t.life <= 0) {
-        scene.remove(t.line);
-        t.line.geometry.dispose();
-        t.line.material.dispose();
-        state.tracers.splice(i, 1);
+    for (let i = tracers.length - 1; i >= 0; i--) {
+      const tracer = tracers[i];
+      tracer.age += dt;
+      tracer.mesh.material.opacity = Math.max(0, 0.9 - tracer.age * 9);
+      if (tracer.age > 0.1) {
+        if (world.scene) world.scene.remove(tracer.mesh);
+        tracers.splice(i, 1);
       }
     }
   }
 
-  // --- enemies ------------------------------------------------------------
-  function spawnEnemies() {
-    // Three rivals guarding the yacht, spread along the marina front
-    // (on the promenade, on land — never out in the basin water).
-    const spots = [
-      { x: 250, z: 186 },
-      { x: 254, z: 212 },
-      { x: 248, z: 208 },
-    ];
-    for (const spot of spots) {
-      const mesh = makeShooterMesh();
-      mesh.position.set(spot.x, 0, spot.z);
-      scene.add(mesh);
-      state.enemies.push({
-        mesh,
-        pos: mesh.position,
-        health: ENEMY_HEALTH,
-        shootTimer: 0.8 + Math.random() * 1.2,
-        squad: false,
-        spawnMission: 4,
-      });
+  function nearestCoverPoint(from, target) {
+    // Pick a car or building corner near the shooter that sits between
+    // the shooter and the player — real cover, not open ground.
+    const candidates = [];
+    for (const car of world.cars) {
+      if (!car || !car.position) continue;
+      candidates.push(car.position);
     }
-    state.enemiesSpawned = true;
-    if (world.hud) world.hud.showMessage('Rival gang shooters at the marina — watch out!');
-  }
-
-  // Rival-squad API for the arc-2 missions (5 and 8): one shooter at each
-  // spot, flagged so the mission can count them. Returns how many spawned.
-  // Spots are {x, z} (a THREE.Vector3 works too — only .x/.z are read).
-  // v3 — opts.elite marks the squad as Harbor War veterans (mission 12):
-  // double health, better aim, harder hits. They wear a gold band so the
-  // player can tell them apart at a glance.
-  function spawnRivalSquad(spots, opts) {
-    if (!Array.isArray(spots)) return 0;
-    const elite = !!(opts && opts.elite);
-    let spawned = 0;
-    for (const spot of spots) {
-      try {
-        if (!spot || typeof spot.x !== 'number' || typeof spot.z !== 'number') continue;
-        const mesh = makeShooterMesh();
-        if (elite) {
-          const band = new THREE.Mesh(
-            new THREE.BoxGeometry(0.8, 0.14, 0.46),
-            new THREE.MeshBasicMaterial({ color: 0xffd34d }),
-          );
-          band.position.y = 1.45;
-          mesh.add(band);
-        }
-        mesh.position.set(spot.x, 0, spot.z);
-        scene.add(mesh);
-        state.enemies.push({
-          mesh,
-          pos: mesh.position,
-          health: elite ? ENEMY_HEALTH * 2 : ENEMY_HEALTH,
-          shootTimer: 0.8 + Math.random() * 1.2,
-          squad: true,
-          spawnMission: world.mission ? world.mission.id : 0,
-          elite,
-        });
-        spawned += 1;
-      } catch {
-        // One bad spot never blocks the rest of the squad.
-      }
+    const colliders = world.city.colliders || [];
+    for (const box of colliders) {
+      candidates.push(new THREE.Vector3(box.minX ?? box.xMin ?? box.x0 ?? 0, 0, box.minZ ?? box.zMin ?? box.z0 ?? 0));
+      candidates.push(new THREE.Vector3(box.maxX ?? box.xMax ?? box.x1 ?? 0, 0, box.maxZ ?? box.zMax ?? box.z1 ?? 0));
     }
-    return spawned;
-  }
-
-  // How many squad rivals are still standing.
-  function rivalsRemaining() {
-    let n = 0;
-    for (const enemy of state.enemies) if (enemy.squad === true) n += 1;
-    return n;
-  }
-
-  function removeEnemy(enemy) {
-    scene.remove(enemy.mesh);
-    const i = state.enemies.indexOf(enemy);
-    if (i >= 0) state.enemies.splice(i, 1);
-  }
-
-  function damageEnemy(enemy, amount) {
-    enemy.health -= amount;
-    if (enemy.health <= 0) removeEnemy(enemy);
-  }
-
-  // --- player actions -----------------------------------------------------
-  function nearestInRange(list, range) {
     let best = null;
-    let bestD = range;
-    for (const item of list || []) {
-      const d = distXZ(world.player.pos, item.pos);
-      if (d < bestD) {
-        best = item;
-        bestD = d;
+    let bestScore = Infinity;
+    for (const point of candidates) {
+      const toShooter = Math.hypot(point.x - from.x, point.z - from.z);
+      const toTarget = Math.hypot(point.x - target.x, point.z - target.z);
+      if (toShooter > 30) continue;
+      // Cover should be close to the shooter and roughly on the line
+      // toward the player, so the shooter can duck behind it.
+      const score = toShooter + toTarget * 0.4;
+      if (score < bestScore) {
+        bestScore = score;
+        best = point;
       }
     }
     return best;
   }
 
-  // Shove a ped or enemy away from a point (punch, shotgun blast).
-  function shoveTarget(target, from, strength) {
-    const dx = target.pos.x - from.x;
-    const dz = target.pos.z - from.z;
-    const len = Math.max(0.01, Math.sqrt(dx * dx + dz * dz));
-    target.pos.x += (dx / len) * strength;
-    target.pos.z += (dz / len) * strength;
-    if (target.mesh) {
-      target.mesh.position.x = target.pos.x;
-      target.mesh.position.z = target.pos.z;
+  function spawnGangSquad(position, count) {
+    const squad = [];
+    for (let i = 0; i < count; i++) {
+      const angle = (i / Math.max(1, count)) * Math.PI * 2;
+      const spawn = new THREE.Vector3(
+        position.x + Math.cos(angle) * (6 + i * 2),
+        0,
+        position.z + Math.sin(angle) * (6 + i * 2)
+      );
+      const mesh = buildShooterMesh();
+      mesh.position.copy(spawn);
+      if (world.scene) world.scene.add(mesh);
+      const shooter = {
+        mesh,
+        position: spawn,
+        heading: angle,
+        health: SHOOTER_HEALTH,
+        state: 'cover',
+        coverPoint: null,
+        fireTimer: 0.6 + Math.random() * 0.8,
+        flankSide: i % 2 === 0 ? 1 : -1,
+        alive: true,
+      };
+      shooters.push(shooter);
+      squad.push(shooter);
+    }
+    // Callers may pass a plain {x, z} point (missions) or a Vector3.
+    const eventPos = (position && typeof position.clone === 'function')
+      ? position.clone()
+      : new THREE.Vector3(position ? position.x || 0 : 0, 0, position ? position.z || 0 : 0);
+    world.events.push({ type: 'gang-squad', position: eventPos, count });
+    return squad;
+  }
+
+  function removeShooter(shooter) {
+    shooter.alive = false;
+    if (world.scene && shooter.mesh) world.scene.remove(shooter.mesh);
+    const index = shooters.indexOf(shooter);
+    if (index >= 0) shooters.splice(index, 1);
+  }
+
+  function damageShooter(shooter, amount, fromPos) {
+    shooter.health -= amount;
+    // A hit knocks them back a step.
+    const away = new THREE.Vector3().subVectors(shooter.position, fromPos);
+    away.y = 0;
+    if (away.lengthSq() > 0.001) {
+      away.normalize();
+      shooter.position.addScaledVector(away, 0.8);
+    }
+    if (shooter.health <= 0) {
+      world.events.push({ type: 'gang-down', position: shooter.position.clone() });
+      removeShooter(shooter);
+    }
+  }
+
+  function updateShooters(dt) {
+    // Shooters only act while the game is actually being played.
+    if (world.mode && world.mode !== 'play') return;
+    const pos = playerPos();
+    for (let i = shooters.length - 1; i >= 0; i--) {
+      const shooter = shooters[i];
+      if (!shooter.alive) continue;
+      const dist = Math.hypot(pos.x - shooter.position.x, pos.z - shooter.position.z);
+      shooter.fireTimer -= dt;
+
+      if (dist > 70) {
+        // Too far: close in, but off to a flank, not straight at the player.
+        shooter.state = 'advance';
+        const side = new THREE.Vector3(-Math.cos(shooter.heading), 0, Math.sin(shooter.heading));
+        const flankTarget = new THREE.Vector3(
+          pos.x + side.x * shooter.flankSide * 25,
+          0,
+          pos.z + side.z * shooter.flankSide * 25
+        );
+        moveToward(shooter, flankTarget, 5.5, dt);
+      } else if (shooter.state === 'cover' || !shooter.coverPoint) {
+        // Find cover near the line to the player, then hold behind it.
+        shooter.coverPoint = nearestCoverPoint(shooter.position, pos);
+        if (shooter.coverPoint) {
+          shooter.state = 'in-cover';
+          moveToward(shooter, shooter.coverPoint, 5, dt);
+        } else {
+          shooter.state = 'flank';
+        }
+      } else if (shooter.state === 'in-cover') {
+        // Peek out and fire inaccurately; reposition to a new flank
+        // every few seconds instead of camping one spot.
+        shooter.state = 'flank';
+        shooter.flankTimer = 2 + Math.random() * 2;
+      } else {
+        // Flanking: strafe sideways around the player while firing.
+        shooter.flankTimer = (shooter.flankTimer || 0) - dt;
+        const side = new THREE.Vector3(
+          -(pos.z - shooter.position.z), 0, pos.x - shooter.position.x
+        ).normalize();
+        const flankTarget = new THREE.Vector3(
+          shooter.position.x + side.x * shooter.flankSide * 12,
+          0,
+          shooter.position.z + side.z * shooter.flankSide * 12
+        );
+        moveToward(shooter, flankTarget, 4, dt);
+        if (shooter.flankTimer <= 0) {
+          shooter.state = 'cover';
+          shooter.coverPoint = null;
+        }
+      }
+
+      // Face the player and fire inaccurate hitscan.
+      shooter.heading = Math.atan2(pos.x - shooter.position.x, pos.z - shooter.position.z);
+      shooter.mesh.position.copy(shooter.position);
+      shooter.mesh.rotation.y = -shooter.heading;
+      if (shooter.fireTimer <= 0 && dist < 60 && world.player.onFoot !== false) {
+        shooter.fireTimer = SHOOTER_FIRE_INTERVAL + Math.random() * 0.6;
+        spawnTracer(
+          shooter.position.clone().setY(1.4),
+          pos.clone().setY(1.2)
+        );
+        if (Math.random() < SHOOTER_HIT_CHANCE) {
+          damagePlayer(8 + Math.floor(Math.random() * 6));
+        }
+      }
+    }
+  }
+
+  function moveToward(shooter, target, speed, dt) {
+    const dx = target.x - shooter.position.x;
+    const dz = target.z - shooter.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.5) return;
+    const step = Math.min(dist, speed * dt);
+    shooter.position.x += (dx / dist) * step;
+    shooter.position.z += (dz / dist) * step;
+  }
+
+  function damagePlayer(amount) {
+    let remaining = amount;
+    if ((world.player.armor || 0) > 0) {
+      const absorbed = Math.min(world.player.armor, remaining);
+      world.player.armor -= absorbed;
+      remaining -= absorbed;
+    }
+    world.player.health = Math.max(0, (world.player.health ?? 100) - remaining);
+    world.events.push({ type: 'player-hit', amount: remaining });
+    if (world.player.health <= 0 && world.mode !== 'over') {
+      world.mode = 'over';
+      world.events.push({ type: 'player-down' });
     }
   }
 
   function punch() {
-    if (world.mode !== 'play' || state.punchCooldown > 0) return false;
-    state.punchCooldown = PUNCH_COOLDOWN;
-    const target = nearestInRange(state.enemies, PUNCH_RANGE)
-      || nearestInRange(world.peds, PUNCH_RANGE);
-    if (!target) {
-      if (world.audio) world.audio.punch();
-      return false;
-    }
-    // Knock the target away from the player and hurt it.
-    shoveTarget(target, world.player.pos, 3);
-    if (state.enemies.includes(target)) {
-      damageEnemy(target, PUNCH_DAMAGE);
-    } else {
-      target.state = 'flee';
-      if (world.events) world.events.push({ type: 'crime', level: 1 });
-    }
-    if (world.audio) world.audio.punch();
-    return true;
-  }
-
-  // --- weapons ------------------------------------------------------------
-  // Keep state.ammo / world.player.ammo on the current weapon's reserve.
-  function syncAmmo() {
-    if (state.weapon === 'fists') {
-      state.ammo = 0;
-    } else {
-      state.ammo = state.ammoByWeapon[state.weapon] ?? 0;
-    }
-    if (world.player) world.player.ammo = state.ammo;
-  }
-
-  function switchWeapon(name) {
-    if (state.weapon === name) return;
-    state.weapon = name;
-    // A half-fired burst does not follow the player to the next weapon.
-    state.burstLeft = 0;
-    state.burstTimer = 0;
-    syncAmmo();
-  }
-
-  // Refill every gun to a full magazine (mission start).
-  function refillAllAmmo() {
-    for (const name of Object.keys(state.ammoByWeapon)) {
-      state.ammoByWeapon[name] = WEAPON_AMMO[name];
-    }
-    syncAmmo();
-  }
-
-  // Shop buy: refill the CURRENT weapon to full. Fists carry no ammo, so
-  // there is nothing to refill — still returns true.
-  function buyAmmo() {
-    if (state.weapon === 'fists') return true;
-    const full = WEAPON_AMMO[state.weapon];
-    if (full === undefined) return true;
-    state.ammoByWeapon[state.weapon] = full;
-    syncAmmo();
-    return true;
-  }
-
-  function aimPoint(range) {
-    // A gun fires along the player's facing direction, level with the
-    // chest, out to its own range. Heading 0 faces -Z (north on the map).
-    const h = world.player.heading || 0;
-    const from = new THREE.Vector3(world.player.pos.x, 1.4, world.player.pos.z);
-    const to = new THREE.Vector3(
-      from.x - Math.sin(h) * range,
-      1.4,
-      from.z - Math.cos(h) * range,
-    );
-    return { from, to, heading: h };
-  }
-
-  function targetInCone(list, from, heading, range, cone) {
-    // Nearest thing roughly in front of the shooter: within `cone`
-    // radians of the aim line and inside `range`.
-    let best = null;
-    let bestD = range;
-    for (const item of list || []) {
-      const dx = item.pos.x - from.x;
-      const dz = item.pos.z - from.z;
-      const d = Math.sqrt(dx * dx + dz * dz);
-      if (d > range || d < 0.01) continue;
-      const angle = Math.atan2(-dx, -dz) - heading;
-      const wrapped = Math.atan2(Math.sin(angle), Math.cos(angle));
-      if (Math.abs(wrapped) > cone) continue;
-      if (d < bestD) {
-        best = item;
-        bestD = d;
+    if (!world.player.onFoot) return;
+    const pos = playerPos();
+    const heading = world.player.heading || 0;
+    const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
+    const hit = (target, targetPos) => {
+      const to = new THREE.Vector3().subVectors(targetPos, pos);
+      to.y = 0;
+      const dist = to.length();
+      if (dist > PUNCH_RANGE) return false;
+      if (dist > 0.01 && to.normalize().dot(forward) < 0.2) return false;
+      to.multiplyScalar(PUNCH_KNOCKBACK);
+      targetPos.add(to);
+      return true;
+    };
+    for (const ped of world.peds) {
+      if (ped && ped.position && hit(ped, ped.position)) {
+        ped.state = 'flee';
+        if (ped.mesh) ped.mesh.position.copy(ped.position);
       }
     }
-    return { target: best, dist: bestD };
-  }
-
-  // One hitscan pellet along `heading`: nearest enemy or ped in the cone
-  // takes the hit (and the knockback, for the shotgun); otherwise the
-  // tracer runs out to max range. Returns the tracer end point.
-  function firePellet(stats, from, heading) {
-    const enemyHit = targetInCone(state.enemies, from, heading, stats.range, stats.cone);
-    const pedHit = targetInCone(world.peds, from, heading, stats.range, stats.cone);
-    let end = new THREE.Vector3(
-      from.x - Math.sin(heading) * stats.range,
-      1.4,
-      from.z - Math.cos(heading) * stats.range,
-    );
-    if (enemyHit.target && (!pedHit.target || enemyHit.dist <= pedHit.dist)) {
-      if (stats.knockback) shoveTarget(enemyHit.target, from, stats.knockback);
-      damageEnemy(enemyHit.target, stats.damage);
-      end = new THREE.Vector3(enemyHit.target.pos.x, 1.2, enemyHit.target.pos.z);
-    } else if (pedHit.target) {
-      if (stats.knockback) shoveTarget(pedHit.target, from, stats.knockback);
-      pedHit.target.state = 'flee';
-      if (world.events) world.events.push({ type: 'crime', level: 1 });
-      end = new THREE.Vector3(pedHit.target.pos.x, 1.2, pedHit.target.pos.z);
-    }
-    addTracer(from, end, 0xffe08a);
-    return end;
-  }
-
-  // One round from a single-shot gun (pistol, or one SMG burst round):
-  // spend one ammo, trace it, play the shot. The pistol keeps its v1
-  // behaviour exactly — dead straight, damage 25, range 60.
-  function fireGunRound(weaponName) {
-    const stats = WEAPON_STATS[weaponName];
-    if (!stats) return false;
-    if ((state.ammoByWeapon[weaponName] ?? 0) <= 0) {
-      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
-      return false;
-    }
-    state.ammoByWeapon[weaponName] -= 1;
-    syncAmmo();
-    const { from, heading } = aimPoint(stats.range);
-    const spread = weaponName === 'pistol' ? 0 : (Math.random() * 2 - 1) * stats.cone;
-    firePellet(stats, from, heading + spread);
-    if (world.events) world.events.push({ type: 'gunshot' });
-    if (world.audio) world.audio.shot();
-    return true;
-  }
-
-  // SMG: one click starts a 3-round burst, rounds 60 ms apart. The timer
-  // lives in update(), not in setTimeout, so it follows the fixed step.
-  function startBurst() {
-    if (state.burstLeft > 0) return false; // already bursting
-    if ((state.ammoByWeapon.smg ?? 0) <= 0) {
-      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
-      return false;
-    }
-    state.burstLeft = SMG_BURST_ROUNDS;
-    state.burstTimer = 0;
-    return stepBurst();
-  }
-
-  function stepBurst() {
-    if (state.burstLeft <= 0) return false;
-    if (world.mode !== 'play') {
-      state.burstLeft = 0;
-      return false;
-    }
-    const fired = fireGunRound('smg');
-    state.burstLeft -= 1;
-    if (!fired) state.burstLeft = 0; // ran dry mid-burst: stop here
-    state.burstTimer = SMG_BURST_GAP;
-    return fired;
-  }
-
-  // Shotgun: one slow blast, 5 pellets in a spread cone, one loud shot.
-  function fireShotgunBlast() {
-    if (state.shotgunCooldown > 0) return false;
-    if ((state.ammoByWeapon.shotgun ?? 0) <= 0) {
-      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
-      return false;
-    }
-    state.ammoByWeapon.shotgun -= 1;
-    syncAmmo();
-    state.shotgunCooldown = SHOTGUN_COOLDOWN;
-    const stats = WEAPON_STATS.shotgun;
-    const { from, heading } = aimPoint(stats.range);
-    for (let i = 0; i < stats.pellets; i += 1) {
-      const spread = (Math.random() * 2 - 1) * stats.cone;
-      firePellet(stats, from, heading + spread);
-    }
-    if (world.events) world.events.push({ type: 'gunshot' });
-    if (world.audio) world.audio.shot();
-    return true;
-  }
-
-  // Rifle: one heavy long-range round, dead straight, with a slow bolt
-  // between shots. The tracer is brighter and longer than the pistol's,
-  // and the shot sound is deeper (audio.rifleShot when it exists).
-  function fireRifleShot() {
-    if (state.rifleCooldown > 0) return false;
-    if ((state.ammoByWeapon.rifle ?? 0) <= 0) {
-      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
-      return false;
-    }
-    state.ammoByWeapon.rifle -= 1;
-    syncAmmo();
-    state.rifleCooldown = RIFLE_COOLDOWN;
-    const stats = WEAPON_STATS.rifle;
-    const { from, heading } = aimPoint(stats.range);
-    firePellet(stats, from, heading);
-    if (world.events) world.events.push({ type: 'gunshot' });
-    if (world.audio) {
-      if (typeof world.audio.rifleShot === 'function') world.audio.rifleShot();
-      else world.audio.shot();
-    }
-    return true;
-  }
-
-  function shoot() {
-    if (world.mode !== 'play') return false;
-    if (state.weapon === 'pistol') return fireGunRound('pistol');
-    if (state.weapon === 'smg') return startBurst();
-    if (state.weapon === 'shotgun') return fireShotgunBlast();
-    if (state.weapon === 'rifle') return fireRifleShot();
-    return false; // fists: F punches, clicks do nothing
-  }
-
-  function hurtPlayer(amount) {
-    if (world.mode !== 'play') return;
-    // v3 armour vest: soaks half the hit and loses that much durability.
-    // A broken vest (0) soaks nothing; the shop sells a fresh one.
-    let taken = amount;
-    if (world.player.armor > 0) {
-      const soaked = amount * ARMOR_ABSORB;
-      world.player.armor = Math.max(0, world.player.armor - soaked);
-      taken = amount - soaked;
-      if (world.player.armor === 0 && world.hud) {
-        world.hud.showMessage('Your armour vest broke!');
+    for (const shooter of [...shooters]) {
+      if (shooter.position && hit(shooter, shooter.position)) {
+        damageShooter(shooter, PUNCH_DAMAGE, pos);
       }
     }
-    world.player.health -= taken;
-    state.lastHitAt = world.time || 0;
-    if (world.player.health <= 0) {
-      world.player.health = 0;
-      world.mode = 'over';
-      if (world.events) world.events.push({ type: 'player-dead' });
-    }
+    world.events.push({ type: 'punch' });
   }
 
-  function updateEnemies(dt) {
-    for (const enemy of [...state.enemies]) {
-      // Face the player and fire on a loose timer; most shots miss.
-      const dx = world.player.pos.x - enemy.pos.x;
-      const dz = world.player.pos.z - enemy.pos.z;
-      enemy.mesh.rotation.y = Math.atan2(dx, dz);
-      enemy.shootTimer -= dt;
-      if (enemy.shootTimer > 0) continue;
-      enemy.shootTimer = ENEMY_SHOT_MIN + Math.random() * (ENEMY_SHOT_MAX - ENEMY_SHOT_MIN);
-      const from = new THREE.Vector3(enemy.pos.x, 1.3, enemy.pos.z);
-      const to = new THREE.Vector3(world.player.pos.x, 1.2, world.player.pos.z);
-      addTracer(from, to, 0xff5544);
-      // v3 — elites (mission 12) aim better and hit harder than the
-      // regular Dourado shooters: 40% hit chance, 12 damage.
-      const hitChance = enemy.elite ? 0.4 : ENEMY_HIT_CHANCE;
-      const hitDamage = enemy.elite ? 12 : ENEMY_HIT_DAMAGE;
-      if (Math.random() < hitChance) hurtPlayer(hitDamage);
+  function fireWeapon() {
+    const weaponKey = world.player.weapon || 'pistol';
+    const weapon = WEAPONS[weaponKey];
+    if (!weapon) return;
+    if (fireCooldown > 0) return;
+    if ((world.player.ammo[weaponKey] || 0) <= 0) {
+      world.events.push({ type: 'dry-fire', weapon: weaponKey });
+      fireCooldown = 0.3;
+      return;
     }
+    world.player.ammo[weaponKey] -= 1;
+    fireCooldown = weapon.rate;
+    if (weapon.burst) {
+      burstLeft = weapon.burst - 1;
+      burstTimer = 0.09;
+    }
+    shootPellet(weapon);
+    world.events.push({ type: 'shot-fired', weapon: weaponKey });
+  }
+
+  function shootPellet(weapon) {
+    const from = playerPos().clone();
+    from.y = 1.4;
+    const pellets = weapon.pellets || 1;
+    let end = null;
+    for (let p = 0; p < pellets; p++) {
+      const dir = aimDirection();
+      end = from.clone().addScaledVector(dir, weapon.range);
+      // Hit the nearest shooter inside the cone.
+      let bestShooter = null;
+      let bestDist = weapon.range;
+      for (const shooter of [...shooters]) {
+        const to = new THREE.Vector3().subVectors(shooter.position, from);
+        to.y = 0;
+        const along = to.dot(dir);
+        if (along < 1 || along > weapon.range) continue;
+        const side = Math.abs(to.x * dir.z - to.z * dir.x);
+        if (side < 1.6 && along < bestDist) {
+          bestDist = along;
+          bestShooter = shooter;
+        }
+      }
+      if (bestShooter) {
+        end = bestShooter.position.clone().setY(1.2);
+        damageShooter(bestShooter, weapon.damage, from);
+        continue;
+      }
+      // Otherwise a pedestrian caught in the line of fire flees.
+      for (const ped of world.peds) {
+        if (!ped || !ped.position) continue;
+        const to = new THREE.Vector3().subVectors(ped.position, from);
+        to.y = 0;
+        const along = to.dot(dir);
+        if (along < 1 || along > weapon.range) continue;
+        const side = Math.abs(to.x * dir.z - to.z * dir.x);
+        if (side < 1.4) {
+          ped.state = 'flee';
+          if (Math.random() < 0.5) {
+            world.events.push({ type: 'crime', kind: 'ped-shot', wanted: world.wanted });
+          }
+          break;
+        }
+      }
+    }
+    if (end) spawnTracer(from, end);
+  }
+
+  function refillAmmo(source) {
+    // Only shops and mission starts may refill — never the field.
+    if (source !== 'shop' && source !== 'mission') return false;
+    for (const key of Object.keys(WEAPONS)) {
+      world.player.ammo[key] = WEAPONS[key].startAmmo;
+    }
+    world.events.push({ type: 'ammo-refill', source });
+    return true;
   }
 
   function update(dt) {
-    updateTracers(dt);
-    if (state.punchCooldown > 0) state.punchCooldown -= dt;
-    if (state.shotgunCooldown > 0) state.shotgunCooldown -= dt;
-    if (state.rifleCooldown > 0) state.rifleCooldown -= dt;
-    if (world.mode !== 'play') return;
-
-    // A new mission refills every gun (missions.js also sets
-    // world.player.ammo; combat is the source of truth for its own state).
-    const missionId = world.mission ? world.mission.id : undefined;
-    if (missionId !== undefined && missionId !== state.lastMissionId) {
-      if (missionId) refillAllAmmo();
-      state.lastMissionId = missionId;
+    // Ammo refill on a fresh mission start.
+    const missionId = world.mission ? world.mission.id : null;
+    if (missionId !== null && missionId !== lastMissionId) {
+      refillAmmo('mission');
     }
+    lastMissionId = missionId;
 
-    // Mission 4 spawns its shooters the moment the crew is aboard.
-    if (missionId === 4 && world.mission.stage >= 2 && !state.enemiesSpawned) {
-      spawnEnemies();
-    }
-    // Cleanup is per-enemy, by the mission that spawned it: the marina
-    // squad leaves when mission 4 ends, and a rival squad spawned for
-    // mission 5 or 8 stays until THAT mission ends. The old
-    // `mission.id !== 4` check cleared every enemy on any mission change,
-    // which would have wiped the 5/8 squads the moment they spawned.
-    if (world.mission && state.enemies.length > 0) {
-      const mid = world.mission.id;
-      let marinaLeft = false;
-      for (const enemy of [...state.enemies]) {
-        if (enemy.spawnMission !== mid) {
-          if (enemy.spawnMission === 4) marinaLeft = true;
-          removeEnemy(enemy);
+    fireCooldown = Math.max(0, fireCooldown - dt);
+    if (burstLeft > 0) {
+      burstTimer -= dt;
+      if (burstTimer <= 0) {
+        burstLeft -= 1;
+        burstTimer = 0.09;
+        const weapon = WEAPONS[world.player.weapon] || WEAPONS.pistol;
+        if ((world.player.ammo[world.player.weapon] || 0) > 0) {
+          world.player.ammo[world.player.weapon] -= 1;
+          shootPellet(weapon);
         }
       }
-      if (marinaLeft && !state.enemies.some((e) => e.spawnMission === 4)) {
-        state.enemiesSpawned = false;
+    }
+
+    const keys = (world.input && world.input.keys) || new Set();
+    for (const [key, weapon] of Object.entries(WEAPON_KEYS)) {
+      if (keys.has(key) && world.player.weapon !== weapon) {
+        world.player.weapon = weapon;
+        world.events.push({ type: 'weapon-switch', weapon });
       }
     }
 
-    const keys = world.input ? world.input.keys : null;
-    // Guns are on-foot weapons: no punching or shooting from a car.
-    const onFoot = !world.player || world.player.onFoot !== false;
-    if (!onFoot) state.burstLeft = 0; // getting in a car cancels a burst
-    // Step an in-flight SMG burst BEFORE new input, so a click that starts
-    // one never fires two rounds in the same frame.
-    if (state.burstLeft > 0 && onFoot) {
-      state.burstTimer -= dt;
-      if (state.burstTimer <= 0) stepBurst();
-    }
-    if (keys) {
-      if (keys.has('Digit1') || keys.has('Numpad1')) switchWeapon('fists');
-      if (keys.has('Digit2') || keys.has('Numpad2')) switchWeapon('pistol');
-      if (keys.has('Digit3') || keys.has('Numpad3')) switchWeapon('smg');
-      if (keys.has('Digit4') || keys.has('Numpad4')) switchWeapon('shotgun');
-      if (keys.has('Digit5') || keys.has('Numpad5')) switchWeapon('rifle');
-      // Edge-triggered punch: only fire once per key press, not per frame.
-      const fDown = keys.has('KeyF') || keys.has('Keyf');
-      if (fDown && !state._fWasDown && onFoot) punch();
-      state._fWasDown = fDown;
-    }
-    if (world.input && world.input.clicked) {
-      world.input.clicked = false;
-      if (onFoot) shoot();
+    // Sniper scope zoom on right-click.
+    const rightDown = !!(world.input && world.input.rightClicked);
+    const weapon = WEAPONS[world.player.weapon] || WEAPONS.pistol;
+    world.player.scopeZoom = rightDown && world.player.weapon === 'sniper' ? weapon.zoom : 1;
+
+    // Punch on F, edge-triggered, on foot only.
+    const fDown = keys.has('KeyF');
+    if (fDown && !fWasDown) punch();
+    fWasDown = fDown;
+
+    // Fire on click (mouse held, rate-limited by the weapon).
+    if (world.input && world.input.clicked && world.player.onFoot) {
+      fireWeapon();
     }
 
-    updateEnemies(dt);
+    updateTracers(dt);
+    updateShooters(dt);
 
-    // Slow health regen after 10 seconds without taking a hit.
-    if (
-      world.player.health < PLAYER_MAX_HEALTH
-      && (world.time || 0) - state.lastHitAt > REGEN_DELAY
-    ) {
-      world.player.health = Math.min(
-        PLAYER_MAX_HEALTH,
-        world.player.health + REGEN_RATE * dt,
-      );
+    // Keep the HUD-facing weapon label fresh.
+    if (world.player.weapon !== lastWeapon) {
+      lastWeapon = world.player.weapon;
     }
   }
 
-  return { update, punch, shoot, state, hurtPlayer, spawnRivalSquad, rivalsRemaining, buyAmmo };
+  const api = {
+    update,
+    spawnGangSquad,
+    refillAmmo,
+    damagePlayer,
+    // Mission cleanup: pull every live shooter off the board at once.
+    clearShooters() {
+      for (const shooter of [...shooters]) removeShooter(shooter);
+    },
+    get weapons() { return WEAPONS; },
+    get shooters() { return shooters; },
+    get currentWeapon() { return WEAPONS[world.player.weapon] || WEAPONS.pistol; },
+  };
+  world.systems.combat = api;
+  return api;
 }

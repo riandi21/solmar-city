@@ -1,232 +1,273 @@
-// Day / night cycle for Solmar City — the sun actually moves.
-//
-// The clock starts at 10:00 on a sunny morning and runs one game hour
-// every 30 real seconds, so a full day takes twelve minutes of play.
-// Dawn (06:00-08:00) and dusk (17:00-19:00) ramp the light smoothly;
-// at night the sun drops to a faint moon-blue, the sky goes dark, the
-// street lamps come on, and the player's car grows headlights. The HUD
-// clock reads this system, and mission 10 ("Midnight Delivery") jumps
-// the clock to midnight when it starts.
-//
-//   createDayNight(scene, world, lights) -> { update, state, clockText,
-//     isNight, nightFactor, setTime, skipToNight, skipToDay }
-// `lights` is { sun, hemi } from the renderer when main.js has it;
-// without them the system still runs the clock and the lamps, and the
-// sky/fog still change. N (KeyN) skips to the next dawn or dusk.
 import * as THREE from 'three';
-import { clamp, daylightFactor, formatClock, isNightHour, lerp, sunAngle } from './world.js';
 
-const HOURS_PER_SECOND = 1 / 30; // one game hour per 30 real seconds
-const DAY_SUN_INTENSITY = 2.4;
-const NIGHT_SUN_INTENSITY = 0.08;
-const DAY_HEMI_INTENSITY = 0.85;
-const NIGHT_HEMI_INTENSITY = 0.14;
-const DAY_FOG = new THREE.Color(0xcfe8f2);
-const NIGHT_FOG = new THREE.Color(0x0d1622);
-const DAY_SUN_COLOR = new THREE.Color(0xfff2d0);
-const NIGHT_SUN_COLOR = new THREE.Color(0x8fb0e8);
-const NIGHT_SKY = new THREE.Color(0x0a1420);
+// Day/night cycle for Solmar City: a full 24-hour clock driving the sun,
+// the moon, the sky colour, the stars, street lamps and car headlights.
+// Everything is a smooth function of the sun's elevation, so dusk and dawn
+// blend instead of snapping. Time can be skipped straight to night.
+export function createDayNight(world) {
+  const scene = world.scene;
+  const dayLength = (world.config && world.config.dayLengthSeconds) || 600;
+  const startHour = (world.config && world.config.startHour) || 10;
 
-// Street lamps stand at eight central crossings; their bulbs glow after dark.
-const LAMP_SPOTS = [
-  { x: -58, z: -58 },
-  { x: 58, z: -58 },
-  { x: -58, z: 58 },
-  { x: 58, z: 58 },
-  { x: -116, z: 0 },
-  { x: 116, z: 0 },
-  { x: 0, z: -116 },
-  { x: 0, z: 116 },
-];
+  let hours = startHour; // 0..24
+  let wasNight = false;
+  let announcedDusk = false;
+  let announcedDawn = false;
 
-export function createDayNight(scene, world, lights) {
-  const sun = (lights && lights.sun) || null;
-  const hemi = (lights && lights.hemi) || null;
-  const daySky = scene ? scene.background : null;
-  const dayFog = scene && scene.fog ? scene.fog.color.clone() : DAY_FOG.clone();
-
-  const state = {
-    hours: 10, // 10:00 — sunny morning, the game's opening light
-    night: 0, // 0 = full day, 1 = deep night
-    dayLengthSeconds: 720, // a full day-night loop, for the HUD
-  };
-
-  // --- street lamps -------------------------------------------------------
-  const lamps = [];
-  if (scene) {
-    const poleMat = new THREE.MeshStandardMaterial({ color: 0x2c313a, roughness: 0.6, metalness: 0.4 });
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.12, 5, 8);
-    const armGeo = new THREE.BoxGeometry(1.4, 0.1, 0.1);
-    const bulbGeo = new THREE.SphereGeometry(0.28, 10, 8);
-    for (const spot of LAMP_SPOTS) {
-      const group = new THREE.Group();
-      const pole = new THREE.Mesh(poleGeo, poleMat);
-      pole.position.y = 2.5;
-      pole.castShadow = false;
-      group.add(pole);
-      const arm = new THREE.Mesh(armGeo, poleMat);
-      arm.position.set(0.6, 4.9, 0);
-      group.add(arm);
-      const bulbMat = new THREE.MeshStandardMaterial({
-        color: 0xffe9a0,
-        emissive: 0xffd34d,
-        emissiveIntensity: 0.1,
-      });
-      const bulb = new THREE.Mesh(bulbGeo, bulbMat);
-      bulb.position.set(1.25, 4.8, 0);
-      group.add(bulb);
-      group.position.set(spot.x, 0, spot.z);
-      scene.add(group);
-      lamps.push({ group, bulbMat });
-    }
+  // --- lights: reuse the renderer's sun/hemi when present, else make ours
+  let sun = world.sun || null;
+  if (!sun) {
+    sun = new THREE.DirectionalLight(0xfff2d8, 2.4);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -320;
+    sun.shadow.camera.right = 320;
+    sun.shadow.camera.top = 320;
+    sun.shadow.camera.bottom = -320;
+    sun.shadow.camera.far = 900;
+    scene.add(sun);
+    scene.add(sun.target);
+  }
+  let hemi = world.hemi || world.hemisphereLight || null;
+  if (!hemi) {
+    hemi = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 0.9);
+    scene.add(hemi);
   }
 
-  // --- headlights: one spotlight that rides the player's car at night -----
-  let headlight = null;
-  let headTarget = null;
-  if (scene) {
-    headlight = new THREE.SpotLight(0xfff2c0, 0, 70, 0.55, 0.45, 1.2);
-    headTarget = new THREE.Object3D();
-    scene.add(headlight);
-    scene.add(headTarget);
-    headlight.target = headTarget;
+  // --- sky palettes (lerped by sun elevation)
+  const SKY_DAY = new THREE.Color(0x7fb4e8);
+  const SKY_DUSK = new THREE.Color(0xe07b3f);
+  const SKY_NIGHT = new THREE.Color(0x0a0f24);
+  const FOG_DAY = new THREE.Color(0xa8c6e2);
+  const FOG_NIGHT = new THREE.Color(0x0d1428);
+  const SUN_DAY = new THREE.Color(0xfff1cf);
+  const SUN_DUSK = new THREE.Color(0xff8a3d);
+  const MOON_LIGHT = new THREE.Color(0x9db8e8);
+  const skyColor = new THREE.Color();
+  const fogColor = new THREE.Color();
+  const tmpColor = new THREE.Color();
+
+  if (scene.background === null || scene.background === undefined) {
+    scene.background = new THREE.Color(0x7fb4e8);
   }
 
-  function daylight() {
-    return daylightFactor(state.hours);
+  // --- stars: a dome of points, faded in at night
+  const starCount = 700;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.random() * Math.PI * 0.48; // upper sky only
+    const r = 880;
+    starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    starPos[i * 3 + 1] = r * Math.cos(phi) + 20;
+    starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starMat = new THREE.PointsMaterial({
+    color: 0xffffff, size: 2.2, sizeAttenuation: false,
+    transparent: true, opacity: 0, depthWrite: false, fog: false,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  scene.add(stars);
+
+  // --- moon: a pale disc that crosses the sky opposite the sun
+  const moon = new THREE.Mesh(
+    new THREE.SphereGeometry(16, 20, 20),
+    new THREE.MeshBasicMaterial({ color: 0xe8eefc, fog: false, transparent: true, opacity: 0 })
+  );
+  scene.add(moon);
+  const moonHalo = new THREE.Mesh(
+    new THREE.SphereGeometry(20, 20, 20),
+    new THREE.MeshBasicMaterial({ color: 0x8fa8d8, fog: false, transparent: true, opacity: 0 })
+  );
+  scene.add(moonHalo);
+
+  const sunDir = new THREE.Vector3();
+  const moonDir = new THREE.Vector3();
+
+  function smoothstep(a, b, x) {
+    const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
   }
 
-  function applyLight() {
-    const day = daylight();
-    state.night = 1 - day;
-    if (sun) {
-      const a = sunAngle(state.hours);
-      sun.position.set(Math.cos(a) * -260, 40 + Math.sin(a) * 260, 180);
-      sun.intensity = lerp(NIGHT_SUN_INTENSITY, DAY_SUN_INTENSITY, day);
-      sun.color.copy(NIGHT_SUN_COLOR).lerp(DAY_SUN_COLOR, day);
-    }
-    if (hemi) hemi.intensity = lerp(NIGHT_HEMI_INTENSITY, DAY_HEMI_INTENSITY, day);
-    if (scene) {
-      if (state.night > 0.5) scene.background = NIGHT_SKY;
-      else if (daySky) scene.background = daySky;
-      if (scene.fog) scene.fog.color.copy(dayFog).lerp(NIGHT_FOG, state.night);
-    }
-    // Lamps glow after dark, dark in daylight.
+  function formatClock() {
+    const h = Math.floor(hours) % 24;
+    const m = Math.floor((hours % 1) * 60);
+    const hh = String(h).padStart(2, '0');
+    const mm = String(m).padStart(2, '0');
+    return hh + ':' + mm;
+  }
+
+  function setLampState(on) {
+    const lamps = world.city && world.city.lamps;
+    if (!Array.isArray(lamps)) return;
     for (const lamp of lamps) {
-      lamp.bulbMat.emissiveIntensity = lerp(0.1, 3.2, state.night);
-    }
-    // Moonlight fill is the sun at low intensity; the renderer module owns
-    // the moon disc itself and reads nightFactor through world.render.
-    try {
-      if (world.render && typeof world.render.setCelestial === 'function') {
-        world.render.setCelestial(state.night);
+      if (!lamp) continue;
+      if (lamp.light) lamp.light.intensity = on ? (lamp.nightIntensity || 2.2) : 0;
+      if (lamp.bulb && lamp.bulb.material && lamp.bulb.material.emissive) {
+        lamp.bulb.material.emissiveIntensity = on ? 2.5 : 0.15;
+      } else if (lamp.mesh && lamp.mesh.material && lamp.mesh.material.emissive) {
+        lamp.mesh.material.emissiveIntensity = on ? 2.5 : 0.15;
       }
-      if (world.render && typeof world.render.setNightExposure === 'function') {
-        world.render.setNightExposure(state.night);
-      }
-    } catch {
-      // Celestial display is cosmetic; never let it break the frame.
     }
   }
 
-  function updateHeadlights() {
-    if (!headlight || !headTarget) return;
-    const player = world.player;
-    const driving = player && player.car && !player.onFoot && state.night > 0.25;
-    if (!driving) {
-      headlight.intensity = 0;
-      return;
+  function setHeadlights(on) {
+    const cars = world.cars;
+    if (!Array.isArray(cars)) return;
+    for (const car of cars) {
+      if (!car || !car.headlights) continue;
+      for (const hl of car.headlights) {
+        if (hl) hl.visible = on;
+      }
+      if (car.headlightMeshes) {
+        for (const m of car.headlightMeshes) if (m) m.visible = on;
+      }
     }
-    const car = player.car;
-    const h = car.heading || 0;
-    const fx = Math.sin(h);
-    const fz = Math.cos(h);
-    headlight.position.set(car.pos.x + fx * 2.2, 0.9, car.pos.z + fz * 2.2);
-    headTarget.position.set(car.pos.x + fx * 26, 0.4, car.pos.z + fz * 26);
-    headlight.intensity = 60 * state.night;
+    const bikes = world.bikes;
+    if (Array.isArray(bikes)) {
+      for (const bike of bikes) {
+        if (bike && bike.headlight) bike.headlight.visible = on;
+      }
+    }
   }
 
-  let prevN = false;
-  let wasNight = isNightHour(state.hours);
+  function applyLighting() {
+    // Sun angle: rises 06:00, sets 18:00, midnight is straight down.
+    const angle = ((hours - 6) / 12) * Math.PI;
+    const elev = Math.sin(angle); // -1..1, >0 while the sun is up
+    const daylight = smoothstep(-0.08, 0.25, elev); // 0 at night, 1 in full day
+    const duskness = 1 - smoothstep(0.02, 0.45, Math.abs(elev)); // peaks at horizon
+    const night = 1 - daylight;
+
+    sunDir.set(Math.cos(angle), Math.sin(angle), 0.35).normalize();
+    sun.position.copy(sunDir).multiplyScalar(420);
+    sun.target.position.set(0, 0, 0);
+    sun.intensity = 0.06 + 2.5 * daylight;
+    tmpColor.copy(SUN_DAY).lerp(SUN_DUSK, duskness);
+    sun.color.copy(tmpColor);
+
+    hemi.intensity = 0.12 + 0.85 * daylight;
+    hemi.color.setHex(0xbfd9ff).lerp(new THREE.Color(0x2a3560), night);
+    hemi.groundColor.setHex(0x8a7a5a).lerp(new THREE.Color(0x1a1c26), night);
+
+    // Sky: day -> dusk tint near the horizon crossing -> night.
+    skyColor.copy(SKY_DAY).lerp(SKY_DUSK, duskness * 0.85);
+    skyColor.lerp(SKY_NIGHT, night);
+    if (scene.background && scene.background.isColor) {
+      scene.background.copy(skyColor);
+    }
+    if (scene.fog && scene.fog.color) {
+      fogColor.copy(FOG_DAY).lerp(FOG_NIGHT, night);
+      scene.fog.color.copy(fogColor);
+    }
+
+    // Moon rides opposite the sun: up while the sun is down.
+    const moonAngle = angle + Math.PI;
+    const moonElev = Math.sin(moonAngle);
+    moonDir.set(Math.cos(moonAngle), Math.sin(moonAngle), -0.3).normalize();
+    moon.position.copy(moonDir).multiplyScalar(820);
+    moonHalo.position.copy(moonDir).multiplyScalar(820);
+    const moonUp = smoothstep(-0.05, 0.3, moonElev);
+    moon.material.opacity = moonUp;
+    moonHalo.material.opacity = moonUp * 0.22;
+    moon.visible = moonUp > 0.01;
+    moonHalo.visible = moonUp > 0.01;
+
+    // Stars fade in as the sky darkens.
+    starMat.opacity = night * 0.95;
+    stars.visible = night > 0.02;
+
+    // Moonlight takes over from sunlight at night.
+    if (night > 0.5 && sun.intensity < 0.25) {
+      sun.color.copy(MOON_LIGHT);
+      sun.intensity = 0.22;
+    }
+
+    const isNight = elev < 0.02;
+    world.night = isNight;
+    world.daylight = daylight;
+    world.timeOfDay = hours;
+    world.clockString = formatClock();
+
+    if (isNight !== wasNight) {
+      setLampState(isNight);
+      setHeadlights(isNight);
+      if (isNight && !announcedDusk && world.events) {
+        world.events.push({ type: 'dusk', time: hours });
+        announcedDusk = true;
+        announcedDawn = false;
+      } else if (!isNight && !announcedDawn && world.events) {
+        world.events.push({ type: 'dawn', time: hours });
+        announcedDawn = true;
+        announcedDusk = false;
+      }
+      wasNight = isNight;
+    }
+
+    // HUD clock line, when the HUD has rendered one.
+    if (typeof document !== 'undefined') {
+      const el = document.getElementById('hud-clock');
+      if (el) el.textContent = formatClock() + (isNight ? '  Night' : '  Day');
+    }
+  }
 
   function update(dt) {
-    const capped = Math.min(dt || 0, 0.1);
-    // The clock runs while the game runs or idles on the menu; it freezes
-    // on pause and on the wasted / busted screens.
-    if (world.mode === undefined || world.mode === 'play' || world.mode === 'menu') {
-      state.hours = (state.hours + capped * HOURS_PER_SECOND) % 24;
-    }
-    // Dawn and dusk get one toast each as the light turns: the player
-    // should notice the city changing, not just find it dark.
-    const nightNow = isNightHour(state.hours);
-    if (nightNow !== wasNight && world.mode === 'play') {
-      try {
-        if (world.hud && typeof world.hud.showMessage === 'function') {
-          world.hud.showMessage(
-            nightNow
-              ? 'Night falls over Solmar — lamps on, headlights out.'
-              : 'Dawn breaks over Solmar — the city wakes up.',
-          );
-        }
-      } catch {
-        // Toast is cosmetic.
-      }
-    }
-    wasNight = nightNow;
-    // N skips time: at night it jumps to dawn, by day it jumps to dusk.
-    // Edge-detected here so holding N does not strobe the clock.
-    const keys = (world.input && world.input.keys) || null;
-    const nDown = keys ? keys.has('KeyN') : false;
-    if (nDown && !prevN) {
-      if (isNightHour(state.hours)) state.hours = 6.5;
-      else state.hours = 18.5;
-      if (world.hud && typeof world.hud.showMessage === 'function') {
-        world.hud.showMessage(isNightHour(state.hours) ? 'Night falls over Solmar…' : 'Dawn breaks over Solmar…');
-      }
-    }
-    prevN = nDown;
-    applyLight();
-    updateHeadlights();
-  }
-
-  // Jump straight to a time of day (missions use this for night jobs).
-  function setTime(hours) {
-    state.hours = ((hours % 24) + 24) % 24;
-    applyLight();
+    hours = (hours + (dt / dayLength) * 24) % 24;
+    world.elapsed = (world.elapsed || 0) + dt;
+    applyLighting();
   }
 
   function skipToNight() {
-    state.hours = 22;
-    applyLight();
+    hours = 21.5;
+    applyLighting();
   }
 
   function skipToDay() {
-    state.hours = 10;
-    applyLight();
+    hours = 10;
+    applyLighting();
   }
 
-  function clockText() {
-    return formatClock(state.hours);
+  function setTime(h) {
+    hours = ((h % 24) + 24) % 24;
+    applyLighting();
   }
 
   function isNight() {
-    return isNightHour(state.hours);
+    return !!world.night;
   }
 
-  function nightFactor() {
-    return clamp(state.night, 0, 1);
+  // Named phase for HUD labels and other systems (territories, police):
+  // 'day' | 'dusk' | 'night' | 'dawn', derived from the same smooth curve.
+  function getPhase() {
+    const angle = ((hours - 6) / 12) * Math.PI;
+    const elev = Math.sin(angle);
+    if (elev > 0.25) return 'day';
+    if (elev > 0.02) return hours < 12 ? 'dawn' : 'dusk';
+    if (elev > -0.12) return hours < 12 ? 'dawn' : 'dusk';
+    return 'night';
   }
 
-  applyLight();
+  function getDaylight() {
+    return world.daylight !== undefined ? world.daylight : 1;
+  }
+
+  applyLighting();
 
   return {
     update,
-    state,
-    clockText,
-    isNight,
-    nightFactor,
-    setTime,
     skipToNight,
     skipToDay,
+    setTime,
+    isNight,
+    getDaylight,
+    getPhase,
+    getTime: () => hours,
+    formatClock,
+    sun,
+    hemi,
+    stars,
+    moon,
   };
 }

@@ -1,411 +1,269 @@
-// Police: the wanted level and the cars that enforce it.
-// Wanted 0-5 lives on world.wanted. addWanted(n) / clearWanted() are the
-// direct API (missions use them for scripted heat); gameplay crimes arrive
-// as world.events {type:'crime', level} and are picked up here. Wanted 1-2
-// fields 1-2 pursuit cars; wanted 3+ fields 3 faster, more aggressive ones.
-// A police car that touches the on-foot player for 2 s straight busts him:
-// mode 'busted', $200 fine, wanted cleared, respawn at the police station.
-// Wanted decays 1 star per 20 s with no crime and no police within 40 m.
-// v3: the policeai system adds flanking (the first two cars swing ahead
-// of the player at 3+ stars), spike strips, and a pursuit speed boost —
-// police.js asks it for a flank point and a boost each step, and chases
-// head-on when it is absent.
-//
-// Events are read by index (seenEvents) and never removed: traffic.js reads
-// the same queue for 'gunshot' / 'pedFlee' events.
-// Heading convention: forward = (sin(heading), 0, cos(heading)).
 import * as THREE from 'three';
-import { makeCar } from './vehicles.js';
 
-const POLICE_STATION = { x: 80, z: -203 }; // north-side station, inside a block
-const BUSTED_FINE = 200;
-const BUST_TOUCH_DIST = 2.5;
-const BUST_TOUCH_TIME = 2.0;
+const STATION = new THREE.Vector3(80, 0, -203);
+const BUST_FINE = 200;
 const DECAY_SECONDS = 20;
-const DECAY_CLEAR_DIST = 40;
-const RESPAWN_DIST = 160; // a pursuit car this far away reappears near the player
-const SIREN_PERIOD = 0.5; // s, red/blue light-bar flash cycle
-// Roadblocks (wanted >= 3): one parked blockade ahead of the player.
-const ROADBLOCK_MIN_WANTED = 3;
-const ROADBLOCK_COOLDOWN = 25; // s between placements
-const ROADBLOCK_AHEAD_MIN = 70; // m ahead of the player
-const ROADBLOCK_AHEAD_MAX = 100;
-const ROADBLOCK_CLEAR_DIST = 120; // m past it (or away from it) clears it
+const ROADBLOCK_COOLDOWN = 30;
 
-function clampAngle(angle) {
-  while (angle > Math.PI) angle -= Math.PI * 2;
-  while (angle < -Math.PI) angle += Math.PI * 2;
-  return angle;
+function dist2(a, b) {
+  return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
-function turnToward(current, target, maxStep) {
-  const diff = clampAngle(target - current);
-  if (Math.abs(diff) <= maxStep) return target;
-  return current + Math.sign(diff) * maxStep;
-}
+export function createPolice(world) {
+  world.cars = world.cars || [];
+  const p = world.player;
+  world.wanted = world.wanted ?? 0;
+  let decayTimer = 0;
+  let lastCrimeAt = -100;
+  let bustedTimer = 0;
+  let roadblockTimer = ROADBLOCK_COOLDOWN;
+  let roadblocks = [];
+  let spikeStrips = [];
+  let lastWanted = world.wanted;
 
-function dist2(ax, az, bx, bz) {
-  const dx = ax - bx;
-  const dz = az - bz;
-  return Math.sqrt(dx * dx + dz * dz);
-}
-
-export function createPolice(scene, world) {
-  const rng = world.rng || Math.random;
-  const rand = (a, b) => a + rng() * (b - a);
-  let policeCars = [];
-  let seenEvents = 0;
-  let clock = 0;
-  let lastCrimeAt = -1e9;
-  let touchTimer = 0;
-  let sirenPhase = 0;
-  // At most one roadblock: { cars: [car, car], barriers: [mesh, mesh], x, z }.
-  let roadblock = null;
-  let lastRoadblockAt = -1e9;
-
-  const playerPos = () => (world.player && world.player.pos) || { x: 0, z: 0 };
-  const wanted = () => Math.max(0, Math.min(5, world.wanted || 0));
-
-  function desiredCount() {
-    const w = wanted();
-    if (w === 0) return 0;
-    if (w <= 2) return w;
-    return 3;
+  function policeCars() {
+    return world.cars.filter((c) => c.driver === 'police');
   }
 
-  function spawnPoliceCar() {
-    const pp = playerPos();
-    // Spawn on a road 45-70 m from the player, in a random direction.
-    const angle = rand(0, Math.PI * 2);
-    const dist = rand(45, 70);
-    let x = pp.x + Math.sin(angle) * dist;
-    let z = pp.z + Math.cos(angle) * dist;
-    // Snap onto the nearest road line so the car never spawns inside a block.
-    const roads = (world.city && Array.isArray(world.city.roads))
-      ? world.city.roads
-      : null;
-    if (roads && roads.length) {
-      let best = null;
-      let bestD = Infinity;
-      for (const road of roads) {
-        const d = road.axis === 'x' ? Math.abs(z - road.coord) : Math.abs(x - road.coord);
-        if (d < bestD) { bestD = d; best = road; }
-      }
-      if (best) {
-        if (best.axis === 'x') z = best.coord + (rng() < 0.5 ? 3.5 : -3.5);
-        else x = best.coord + (rng() < 0.5 ? 3.5 : -3.5);
-      }
+  function spawnPoliceCar(x, z, heading) {
+    const vehicles = world.systems && world.systems.vehicles;
+    if (vehicles && vehicles.spawnCar) {
+      const car = vehicles.spawnCar('police', x, z, heading, 'police');
+      car.maxSpeed = world.wanted >= 3 ? 36 : 32;
+      car.speed = 12;
+      return car;
     }
-    x = Math.max(-250, Math.min(250, x));
-    z = Math.max(-250, Math.min(250, z));
-    const heading = Math.atan2(pp.x - x, pp.z - z);
-    const car = makeCar(scene, world, 'police', { x, z }, heading);
-    car.ai = { police: true, cruise: 30 };
-    policeCars.push(car);
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2, 0.7, 4.4),
+      new THREE.MeshStandardMaterial({ color: 0x1c1c22 }));
+    body.position.y = 0.7;
+    g.add(body);
+    g.position.set(x, 0, z);
+    if (world.scene) world.scene.add(g);
+    const car = { kind: 'police', driver: 'police', mesh: g, position: g.position, heading, speed: 12, maxSpeed: 32 };
+    world.cars.push(car);
     return car;
   }
 
-  function removePoliceCar(car) {
-    scene.remove(car.mesh);
-    const i = (world.cars || []).indexOf(car);
-    if (i >= 0) world.cars.splice(i, 1);
-    const j = policeCars.indexOf(car);
-    if (j >= 0) policeCars.splice(j, 1);
-  }
-
-  function removeAllPolice() {
-    for (const car of [...policeCars]) removePoliceCar(car);
+  function desiredPoliceCount() {
+    if (world.wanted <= 0) return 0;
+    if (world.wanted <= 2) return world.wanted;
+    return 3;
   }
 
   function nearestPoliceDist() {
-    const pp = playerPos();
     let best = Infinity;
-    for (const car of policeCars) {
-      best = Math.min(best, dist2(car.pos.x, car.pos.z, pp.x, pp.z));
-    }
+    for (const c of policeCars()) best = Math.min(best, dist2(c.position, p.position));
     return best;
   }
 
-  // ---- Roadblocks ---------------------------------------------------------
-  // One parked blockade 70-100 m ahead of the player, snapped to the nearest
-  // road: 2 parked police cars across the road + 2 striped barriers between
-  // them. The parked cars are NOT pursuit cars — they never enter the
-  // policeCars chase array, keep ai null and speed 0, and only sit in
-  // world.cars so the player can collide with them.
-  function snapToRoad(x, z) {
-    try {
-      if (world.city && typeof world.city.nearestRoad === 'function') {
-        return world.city.nearestRoad(x, z);
-      }
-    } catch (err) {
-      // Fall through to the inline road scan below.
+  function clearRoadblocks() {
+    for (const c of roadblocks) {
+      const i = world.cars.indexOf(c);
+      if (i >= 0) world.cars.splice(i, 1);
+      if (world.scene && c.mesh) world.scene.remove(c.mesh);
     }
-    const roads = (world.city && Array.isArray(world.city.roads)) ? world.city.roads : null;
-    if (!roads || !roads.length) return { road: null, x, z };
-    let best = null;
-    let bestD = Infinity;
-    for (const road of roads) {
-      const d = road.axis === 'x' ? Math.abs(z - road.coord) : Math.abs(x - road.coord);
-      if (d < bestD) { bestD = d; best = road; }
-    }
-    if (!best) return { road: null, x, z };
-    if (best.axis === 'x') return { road: best, x: Math.max(-250, Math.min(250, x)), z: best.coord };
-    return { road: best, x: best.coord, z: Math.max(-250, Math.min(250, z)) };
+    roadblocks = [];
+    for (const s of spikeStrips) if (world.scene) world.scene.remove(s.mesh);
+    spikeStrips = [];
   }
 
-  function makeBarrier(x, z, heading) {
-    const group = new THREE.Group();
-    const orange = new THREE.MeshStandardMaterial({ color: 0xe8722a, roughness: 0.7 });
-    const white = new THREE.MeshStandardMaterial({ color: 0xf2f2e8, roughness: 0.7 });
-    const base = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.9, 0.4), orange);
-    base.position.y = 0.55;
-    base.castShadow = true;
-    group.add(base);
-    for (const sx of [-0.8, 0.8]) {
-      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.92, 0.42), white);
-      stripe.position.set(sx, 0.55, 0);
-      group.add(stripe);
+  function makeSpikeStrip(x, z, heading) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.6, metalness: 0.5 });
+    const base = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.12, 0.8), mat);
+    base.position.y = 0.06;
+    g.add(base);
+    const spikeMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9, roughness: 0.25 });
+    for (let i = -1; i <= 1; i++) {
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.35, 6), spikeMat);
+      spike.position.set(i * 1.1, 0.25, 0);
+      g.add(spike);
     }
-    group.position.set(x, 0, z);
-    group.rotation.y = heading;
-    scene.add(group);
-    return group;
+    g.position.set(x, 0, z);
+    g.rotation.y = heading;
+    if (world.scene) world.scene.add(g);
+    return { mesh: g, position: g.position, heading, hit: false };
   }
 
-  function placeRoadblock() {
-    try {
-      const pp = playerPos();
-      const heading = (world.player && world.player.heading) || 0;
-      const ahead = rand(ROADBLOCK_AHEAD_MIN, ROADBLOCK_AHEAD_MAX);
-      const tx = pp.x + Math.sin(heading) * ahead;
-      const tz = pp.z + Math.cos(heading) * ahead;
-      const snap = snapToRoad(tx, tz);
-      if (!snap.road) return;
-      const cars = [];
-      const barriers = [];
-      if (snap.road.axis === 'x') {
-        // Road runs along X: cars sit across it (facing +Z), 8 m apart.
-        for (const ox of [-4, 4]) {
-          const car = makeCar(scene, world, 'police', { x: snap.x + ox, z: snap.z }, 0);
-          car.ai = null;
-          car.speed = 0;
-          cars.push(car);
-        }
-        barriers.push(makeBarrier(snap.x, snap.z - 4.5, 0));
-        barriers.push(makeBarrier(snap.x, snap.z + 4.5, 0));
+  function layRoadblock() {
+    clearRoadblocks();
+    // Parked cars ahead of the player's direction of travel.
+    const dir = new THREE.Vector3(Math.sin(p.heading), 0, Math.cos(p.heading));
+    if (p.car) dir.set(Math.sin(p.car.heading), 0, Math.cos(p.car.heading));
+    const ahead = p.position.clone().addScaledVector(dir, 42);
+    const side = new THREE.Vector3(dir.z, 0, -dir.x);
+    const vehicles = world.systems && world.systems.vehicles;
+    for (let i = -1; i <= 1; i++) {
+      const pos = ahead.clone().addScaledVector(side, i * 3.2);
+      let car;
+      if (vehicles && vehicles.spawnCar) {
+        car = vehicles.spawnCar('sedan', pos.x, pos.z, p.heading + Math.PI / 2, 'roadblock');
       } else {
-        // Road runs along Z: cars sit across it (facing +X), 8 m apart.
-        for (const oz of [-4, 4]) {
-          const car = makeCar(scene, world, 'police', { x: snap.x, z: snap.z + oz }, Math.PI / 2);
-          car.ai = null;
-          car.speed = 0;
-          cars.push(car);
-        }
-        barriers.push(makeBarrier(snap.x - 4.5, snap.z, Math.PI / 2));
-        barriers.push(makeBarrier(snap.x + 4.5, snap.z, Math.PI / 2));
+        continue;
       }
-      roadblock = { cars, barriers, x: snap.x, z: snap.z };
-      lastRoadblockAt = clock;
-    } catch (err) {
-      // A failed placement just means no roadblock this time.
-      roadblock = null;
+      car.speed = 0;
+      car.maxSpeed = 0;
+      roadblocks.push(car);
+    }
+    // NEW Round 6: at 4 stars and above the roadblock also lays spikes.
+    if (world.wanted >= 4) {
+      const stripPos = p.position.clone().addScaledVector(dir, 30);
+      spikeStrips.push(makeSpikeStrip(stripPos.x, stripPos.z, p.heading));
+      const stripPos2 = p.position.clone().addScaledVector(dir, 34).addScaledVector(side, 4);
+      spikeStrips.push(makeSpikeStrip(stripPos2.x, stripPos2.z, p.heading));
+    }
+    roadblockTimer = ROADBLOCK_COOLDOWN;
+    (world.events = world.events || []).push({ type: 'roadblock', wanted: world.wanted });
+  }
+
+  function checkSpikes() {
+    const veh = p.car || p.bike;
+    if (!veh) return;
+    for (const strip of spikeStrips) {
+      if (strip.hit) continue;
+      if (dist2(veh.position, strip.position) < 3.2) {
+        strip.hit = true;
+        veh.speed *= 0.35;
+        p.tireDamage = Math.min(1, (p.tireDamage || 0) + 0.35);
+        (world.events = world.events || []).push({ type: 'spike-hit', tireDamage: p.tireDamage });
+        if (world.scene) world.scene.remove(strip.mesh);
+      }
     }
   }
 
-  function removeRoadblock() {
-    if (!roadblock) return;
-    for (const car of roadblock.cars || []) {
-      try {
-        scene.remove(car.mesh);
-        const i = (world.cars || []).indexOf(car);
-        if (i >= 0) world.cars.splice(i, 1);
-      } catch (err) {
-        // Keep removing the rest even if one car is already gone.
-      }
-    }
-    for (const barrier of roadblock.barriers || []) {
-      try {
-        scene.remove(barrier);
-      } catch (err) {
-        // Ignore a barrier that is already gone.
-      }
-    }
-    roadblock = null;
-  }
-
-  function updateRoadblock() {
-    try {
-      if (wanted() >= ROADBLOCK_MIN_WANTED) {
-        if (!roadblock && clock - lastRoadblockAt >= ROADBLOCK_COOLDOWN) placeRoadblock();
-      } else if (roadblock) {
-        removeRoadblock();
-      }
-      if (roadblock) {
-        const pp = playerPos();
-        if (dist2(pp.x, pp.z, roadblock.x, roadblock.z) > ROADBLOCK_CLEAR_DIST) {
-          removeRoadblock();
-        }
-      }
-    } catch (err) {
-      // Roadblocks are cosmetic pressure, never a crash risk.
+  function chasePolice(car, dt) {
+    const toPlayer = new THREE.Vector3().subVectors(p.position, car.position);
+    toPlayer.y = 0;
+    const dist = toPlayer.length();
+    const targetHeading = Math.atan2(toPlayer.x, toPlayer.z);
+    let diff = targetHeading - car.heading;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const fast = world.wanted >= 3 ? 1.15 : 1;
+    car.heading += THREE.MathUtils.clamp(diff, -2.2 * dt, 2.2 * dt);
+    const wantSpeed = dist > 6 ? car.maxSpeed * fast : car.maxSpeed * 0.4;
+    car.speed += (wantSpeed - car.speed) * Math.min(1, dt * 1.2);
+    // Ram: keep pushing into the player when close.
+    if (dist < 4 && (p.car || p.bike)) car.speed = Math.max(car.speed, 14);
+    car.position.x += Math.sin(car.heading) * car.speed * dt;
+    car.position.z += Math.cos(car.heading) * car.speed * dt;
+    if (car.mesh) {
+      car.mesh.position.copy(car.position);
+      car.mesh.rotation.y = car.heading;
     }
   }
 
-  function doBusted() {
-    const cash = world.cash || 0;
-    const fine = Math.min(BUSTED_FINE, cash);
-    world.cash = cash - fine;
-    if (world.player) world.player.cash = world.cash;
+  function bustPlayer() {
+    p.cash = Math.max(0, (p.cash || 0) - BUST_FINE);
     world.wanted = 0;
-    removeAllPolice();
-    removeRoadblock();
-    touchTimer = 0;
-    // Leave the car where it was; Rico walks out of the station on foot.
-    if (world.player) {
-      world.player.car = null;
-      world.player.onFoot = true;
-      world.player.pos.set(POLICE_STATION.x, 0, POLICE_STATION.z);
-      world.player.heading = 0;
-      if (world.player.mesh) {
-        world.player.mesh.visible = true;
-        world.player.mesh.rotation.y = 0;
-      }
+    decayTimer = 0;
+    bustedTimer = 0;
+    clearRoadblocks();
+    for (const c of policeCars()) {
+      const i = world.cars.indexOf(c);
+      if (i >= 0) world.cars.splice(i, 1);
+      if (world.scene && c.mesh) world.scene.remove(c.mesh);
     }
-    world.mode = 'busted';
-    if (!world.events) world.events = [];
-    world.events.push({ type: 'busted', data: { fine } });
-  }
-
-  function stepChase(car, dt) {
-    const pp = playerPos();
-    const w = wanted();
-    const aggressive = w >= 3;
-    const dx = pp.x - car.pos.x;
-    const dz = pp.z - car.pos.z;
-    const d = Math.hypot(dx, dz) || 1;
-    // v3 — flanking: at 3+ stars the police AI assigns the first two
-    // pursuit cars points ahead-left / ahead-right of the player, so the
-    // chase closes from three sides instead of one tail. A car that is
-    // already close ignores the flank and rams. The assignment comes
-    // from the policeai system; without it, every car chases head-on.
-    let steerX = pp.x;
-    let steerZ = pp.z;
-    try {
-      const ai = world.systems && world.systems.policeai;
-      if (ai && typeof ai.flankTarget === 'function') {
-        const idx = policeCars.indexOf(car);
-        const flank = ai.flankTarget(idx, car.pos);
-        if (flank) {
-          steerX = flank.x;
-          steerZ = flank.z;
-        }
-      }
-    } catch (err) {
-      // A bad flank read never breaks the chase.
-    }
-    // Steer at the player (or the flank point); the aggressive tier
-    // turns harder and runs faster.
-    const wantHeading = Math.atan2(steerX - car.pos.x, steerZ - car.pos.z);
-    car.heading = turnToward(car.heading, wantHeading, (aggressive ? 3.0 : 2.2) * dt);
-    // Close in, then hold: on an on-foot player the car pulls up and stops
-    // on top of him (that is what makes the 2 s bust timer possible — a car
-    // that keeps driving through would orbit him forever). On a car, ram.
-    const onFoot = world.player && world.player.onFoot;
-    let target;
-    if (onFoot) {
-      target = d < 3 ? 0 : Math.min(8, d * 1.5);
-    } else {
-      // v3 — pursuit boost: at high heat the police AI grants the chase
-      // cars a few extra m/s, so 4- and 5-star chases stay dangerous.
-      let boost = 0;
-      try {
-        const ai = world.systems && world.systems.policeai;
-        if (ai && typeof ai.extraSpeed === 'function') boost = ai.extraSpeed() || 0;
-      } catch (err) {
-        boost = 0;
-      }
-      const top = aggressive ? car.maxSpeed + boost : 30;
-      target = d < 4 ? top * 0.55 : top;
-    }
-    const rate = target < car.speed ? 18 : 9;
-    car.speed += Math.max(-rate * dt, Math.min(rate * dt, target - car.speed));
-    // Lost the player far away: reappear on a road near him.
-    if (d > RESPAWN_DIST) {
-      removePoliceCar(car);
-      spawnPoliceCar();
-    }
-  }
-
-  function flashLightBars(dt) {
-    sirenPhase += dt;
-    const redOn = (sirenPhase % SIREN_PERIOD) < SIREN_PERIOD / 2;
-    for (const car of policeCars) {
-      const bar = car.mesh.userData.lightBar;
-      if (!bar) continue;
-      bar.redMat.emissiveIntensity = redOn ? 2.2 : 0.15;
-      bar.blueMat.emissiveIntensity = redOn ? 0.15 : 2.2;
-    }
-  }
-
-  function processEvents() {
-    const events = world.events || [];
-    for (; seenEvents < events.length; seenEvents += 1) {
-      const ev = events[seenEvents];
-      if (ev && ev.type === 'crime') {
-        const level = (ev.data && ev.data.level) || 1;
-        world.wanted = Math.max(0, Math.min(5, (world.wanted || 0) + level));
-        lastCrimeAt = clock;
-      }
-    }
+    p.car = null; p.bike = null; p.onFoot = true;
+    p.position.copy(STATION);
+    p.heading = Math.PI;
+    p.speed = 0;
+    if (p.mesh) { p.mesh.visible = true; p.mesh.position.copy(p.position); }
+    world.mode = 'play';
+    (world.events = world.events || []).push({ type: 'busted', fine: BUST_FINE });
   }
 
   function addWanted(n) {
     world.wanted = Math.max(0, Math.min(5, (world.wanted || 0) + n));
-    if (n > 0) lastCrimeAt = clock;
-  }
-
-  function clearWanted() {
-    world.wanted = 0;
-    touchTimer = 0;
-    removeAllPolice();
-    removeRoadblock();
+    decayTimer = 0;
+    lastCrimeAt = world.elapsed || 0;
+    (world.events = world.events || []).push({ type: 'crime', wanted: world.wanted });
   }
 
   function update(dt) {
-    const capped = Math.min(dt, 0.05);
-    clock += capped;
-    processEvents();
-    if (world.mode !== undefined && world.mode !== 'play') {
-      flashLightBars(capped);
-      return;
+    if (world.mode && world.mode !== 'play') return;
+    // Crimes queued by other systems raise the wanted level once each.
+    if (world.events) {
+      for (const e of world.events) {
+        if (e.type === 'crime' && e.source !== 'police' && e.counted !== true) {
+          e.counted = true;
+          // addWanted pushes its own event, so raise the level directly
+          // here to avoid re-counting the event we just created.
+          world.wanted = Math.max(0, Math.min(5, (world.wanted || 0) + (e.stars || 1)));
+          lastCrimeAt = world.elapsed || 0;
+          decayTimer = 0;
+        }
+      }
     }
-    // Match the pursuit fleet to the wanted level.
-    const want = desiredCount();
-    while (policeCars.length < want) spawnPoliceCar();
-    while (policeCars.length > want) removePoliceCar(policeCars[policeCars.length - 1]);
-    for (const car of [...policeCars]) stepChase(car, capped);
-    flashLightBars(capped);
-    updateRoadblock();
+    if (world.wanted !== lastWanted) {
+      // A jump to 0 (busted / cleared) resets the decay clock.
+      if (world.wanted === 0) decayTimer = 0;
+      lastWanted = world.wanted;
+    }
 
-    // Busted: a pursuit car on top of the on-foot player for 2 s straight.
-    const onFoot = world.player && world.player.onFoot;
-    if (onFoot && policeCars.length) {
-      if (nearestPoliceDist() < BUST_TOUCH_DIST) {
-        touchTimer += capped;
-        if (touchTimer >= BUST_TOUCH_TIME) doBusted();
+    // Spawn / despawn pursuit cars to match the wanted level.
+    const want = desiredPoliceCount();
+    const cops = policeCars();
+    if (cops.length < want) {
+      const angle = (world.rng ? world.rng() : Math.random()) * Math.PI * 2;
+      spawnPoliceCar(
+        p.position.x + Math.sin(angle) * 45,
+        p.position.z + Math.cos(angle) * 45,
+        angle,
+      );
+    } else if (cops.length > want) {
+      const extra = cops[cops.length - 1];
+      const i = world.cars.indexOf(extra);
+      if (i >= 0) world.cars.splice(i, 1);
+      if (world.scene && extra.mesh) world.scene.remove(extra.mesh);
+    }
+
+    for (const car of policeCars()) chasePolice(car, dt);
+
+    // Busted: a police touch on the on-foot player for 2 seconds.
+    if (p.onFoot && world.wanted > 0) {
+      const near = nearestPoliceDist();
+      if (near < 2.6) {
+        bustedTimer += dt;
+        if (bustedTimer >= 2) bustPlayer();
       } else {
-        touchTimer = 0;
+        bustedTimer = 0;
       }
     } else {
-      touchTimer = 0;
+      bustedTimer = 0;
     }
 
-    // Decay: 1 star per 20 s with no crime and no police within 40 m.
-    if (wanted() > 0 && clock - lastCrimeAt >= DECAY_SECONDS && nearestPoliceDist() > DECAY_CLEAR_DIST) {
-      world.wanted = wanted() - 1;
-      lastCrimeAt = clock;
+    // Wanted decay: 1 star per 20 s with no crime and no police within 40 m.
+    if (world.wanted > 0) {
+      const quiet = (world.elapsed || 0) - lastCrimeAt > 5 && nearestPoliceDist() > 40;
+      if (quiet) {
+        decayTimer += dt;
+        if (decayTimer >= DECAY_SECONDS) {
+          world.wanted = Math.max(0, world.wanted - 1);
+          decayTimer = 0;
+        }
+      } else {
+        decayTimer = 0;
+      }
     }
+
+    // Roadblocks at 3 stars and above, with a cooldown; clear when far.
+    roadblockTimer -= dt;
+    if (world.wanted >= 3 && roadblockTimer <= 0 && roadblocks.length === 0) {
+      layRoadblock();
+    }
+    if (roadblocks.length > 0 && dist2(p.position, roadblocks[0].position) > 130) {
+      clearRoadblocks();
+      roadblockTimer = 8; // short pause before the next one can form
+    }
+    checkSpikes();
   }
 
-  return { update, addWanted, clearWanted };
+  return {
+    update, addWanted, clearRoadblocks, bustPlayer, policeCars,
+    clearWanted() { world.wanted = 0; decayTimer = 0; },
+    get roadblocks() { return roadblocks; },
+    get spikeStrips() { return spikeStrips; },
+  };
 }

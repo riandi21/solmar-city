@@ -1,325 +1,251 @@
-// The screenshot scenes behind ?shot=chase|drive|foot|mission. Each one plays the
-// real game forward from a fixed seed for a few seconds, steered by scripted
-// inputs (drive along a road, flee the police, race the Old Town Loop, head
-// for a midnight drop), so the frame is what a short game really looks like
-// and the same seed always gives the same frame. Every system call is
-// guarded: if a system is missing the scene still stages with plain
-// positions, and main.js paints the result twice and sets window.__shotReady.
-//
-// v3 staging — every shot shows new content:
-//   chase   — a dusk police chase: 4 stars, the helicopter, and a spike
-//             strip laid across the road ahead.
-//   drive   — the Old Town Loop street race: the start gantry on the
-//             quarter's edge, checkpoint rings, townhouses and cathedral.
-//   foot    — midnight at the lighthouse: Rico on foot on the beach, the
-//             rotating beam sweeping the coast, lamps lit, stars out.
-//   mission — mission 10, Midnight Delivery: four glowing harbour rings
-//             against the night, the clock reading past midnight.
-import * as THREE from 'three';
+// Staged screenshot captures for Solmar City.
+// Reads ?shot=chase|drive|foot|mission and ?seed= from the page URL.
+// Each shot arranges the real game state (player, police, mission,
+// bike, marker) from a fixed seed, steers it forward with scripted
+// inputs for a couple of frames, then reports ready after two paints
+// through world.shotReady, window.__shotReady and a body data flag,
+// so the capture tool knows the frame is settled.
+export function createShots(world) {
+  const params = new URLSearchParams(window.location.search);
+  const shotName = params.get('shot') || '';
+  const seedValue = parseInt(params.get('seed') || '1', 10) || 1;
+  const SHOTS = ['chase', 'drive', 'foot', 'mission'];
+  const active = SHOTS.includes(shotName) ? shotName : null;
 
-const STEP = 1 / 60;
-const DRIVE_SECONDS = 7;
-const CHASE_SECONDS = 6;
-const MISSION_SECONDS = 5;
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function next() {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
-/** Where the camera and the steering should look: the car when Rico drives,
- * Rico himself when he is on foot. (player.js keeps world.player.pos glued
- * to the car while driving, so it is the honest focus either way.) */
-function focusPos(world) {
-  if (world.player && world.player.car && world.player.car.pos) return world.player.car.pos;
-  return world.player.pos;
-}
-function focusHeading(world) {
-  if (world.player && world.player.car) return world.player.car.heading;
-  return world.player.heading;
-}
+  function placePlayer(x, z, heading, speed) {
+    const player = world.player;
+    if (!player) return;
+    if (player.position && player.position.set) {
+      player.position.set(x, 0, z);
+    } else {
+      player.position = { x, y: 0, z };
+    }
+    player.heading = heading;
+    player.speed = speed;
+    if (player.mesh && player.mesh.position && player.mesh.position.set) {
+      player.mesh.position.set(x, 0, z);
+    }
+    if (player.mesh) player.mesh.rotation.y = heading;
+  }
 
-/** Call every system's update once, in world order; a missing system is skipped.
- * The order matches main.js stepOrder, so staged scenes play identically. */
-function stepWorld(world, dt) {
-  const systems = world.systems || {};
-  const order = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops', 'daynight', 'oldtown', 'policeai', 'missions3', 'activities'];
-  for (const name of order) {
-    const system = systems[name];
-    if (system && typeof system.update === 'function') {
-      try {
-        system.update(dt);
-      } catch (error) {
-        console.warn(`[shots] ${name}.update failed during staging`, error);
-      }
+  function nearPolice(count, px, pz, heading) {
+    const cars = world.cars || [];
+    let placed = 0;
+    for (const car of cars) {
+      if (placed >= count) break;
+      if (car.kind !== 'police') continue;
+      const back = 18 + placed * 10;
+      const side = (placed % 2 === 0 ? -1 : 1) * 6;
+      const x = px - Math.sin(heading) * back + Math.cos(heading) * side;
+      const z = pz - Math.cos(heading) * back - Math.sin(heading) * side;
+      if (car.position && car.position.set) car.position.set(x, 0, z);
+      else car.position = { x, y: 0, z };
+      car.heading = heading;
+      car.speed = 14 + placed * 2;
+      if (car.mesh && car.mesh.position && car.mesh.position.set) car.mesh.position.set(x, 0, z);
+      placed += 1;
     }
   }
-  world.time = (world.time || 0) + dt;
-}
 
-/** Steer toward a waypoint: hold W, tap A/D to close the heading gap. */
-function driveToward(world, target) {
-  const keys = world.input && world.input.keys;
-  if (!keys) return;
-  const pos = focusPos(world);
-  const dx = target.x - pos.x;
-  const dz = target.z - pos.z;
-  const want = Math.atan2(dx, dz);
-  let gap = want - focusHeading(world);
-  while (gap > Math.PI) gap -= Math.PI * 2;
-  while (gap < -Math.PI) gap += Math.PI * 2;
-  keys.add('KeyW');
-  keys.delete('KeyA');
-  keys.delete('KeyD');
-  if (gap > 0.12) keys.add('KeyD');
-  else if (gap < -0.12) keys.add('KeyA');
-}
+  function nearTraffic(count, px, pz) {
+    const cars = world.cars || [];
+    const rng = mulberry32(seedValue + 77);
+    let placed = 0;
+    for (const car of cars) {
+      if (placed >= count) break;
+      if (car.kind === 'police' || car.kind === 'player') continue;
+      const x = px + (rng() - 0.5) * 120;
+      const z = pz + (rng() - 0.5) * 120;
+      if (car.position && car.position.set) car.position.set(x, 0, z);
+      else car.position = { x, y: 0, z };
+      car.heading = rng() * Math.PI * 2;
+      car.speed = 6 + rng() * 6;
+      placed += 1;
+    }
+  }
 
-/** Put the player in a car at (x, z) facing heading, spawning one if needed. */
-function putPlayerInCar(world, x, z, heading) {
-  const systems = world.systems || {};
-  const player = world.player;
-  player.onFoot = false;
-  player.heading = heading;
-  player.pos.set(x, 0, z);
-  player.speed = 0;
-  try {
-    if (systems.vehicles && typeof systems.vehicles.spawnCar === 'function') {
-      const car = systems.vehicles.spawnCar('player', player.pos.clone(), heading, 0xd7263d);
+  function stageChase() {
+    world.mode = 'play';
+    world.wanted = 3;
+    world.cash = 2450;
+    if (world.player) world.player.cash = 2450;
+    world.mission = {
+      id: 3,
+      stage: 1,
+      objective: 'Survive a 3-star wanted level for 60 seconds — lose the cops!',
+      marker: { x: 58, z: 29 },
+      timer: 42,
+    };
+    const player = world.player;
+    if (player) {
+      const car = (world.cars || []).find((c) => c.kind === 'player');
       if (car) {
         player.car = car;
-        if (systems.player && typeof systems.player.enterCar === 'function') {
-          systems.player.enterCar(car);
-        }
+        player.onFoot = false;
       }
+      placePlayer(0, 116, Math.PI, 16);
     }
-  } catch (error) {
-    console.warn('[shots] spawnCar failed during staging', error);
+    nearPolice(3, 0, 116, Math.PI);
+    nearTraffic(5, 0, 116);
+    pressKeys(['KeyW']);
   }
-  // Fallback when no vehicle system exists yet: move the player mesh by hand.
-  if (!player.car && player.mesh) {
-    player.mesh.position.copy(player.pos);
-    player.mesh.rotation.y = heading;
-  }
-}
 
-/** Put the player on foot at (x, z) facing heading. */
-function putPlayerOnFoot(world, x, z, heading) {
-  const systems = world.systems || {};
-  const player = world.player;
-  try {
-    if (player.car && systems.player && typeof systems.player.exitCar === 'function') {
-      systems.player.exitCar();
-    }
-  } catch (error) {
-    console.warn('[shots] exitCar failed during staging', error);
-  }
-  player.car = null;
-  player.onFoot = true;
-  player.heading = heading;
-  player.pos.set(x, 0, z);
-  player.speed = 0;
-  if (player.mesh) {
-    player.mesh.position.copy(player.pos);
-    player.mesh.rotation.y = heading;
-  }
-}
-
-/** Chase camera: behind the player, a little above, looking ahead of them. */
-function placeCamera(world) {
-  const pos = focusPos(world);
-  const heading = focusHeading(world);
-  const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
-  const behind = pos.clone().addScaledVector(forward, -13);
-  behind.y = pos.y + 5.5;
-  world.camera.position.copy(behind);
-  const look = pos.clone().addScaledVector(forward, 8);
-  look.y = pos.y + 1.5;
-  world.camera.lookAt(look);
-}
-
-/** Seed the traffic and pedestrians by running the world a couple of seconds. */
-function warmUp(world, seconds) {
-  const steps = Math.round(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) stepWorld(world, STEP);
-}
-
-/** Jump the day/night clock when the system exists (guarded: no-op without it). */
-function setClock(world, hours) {
-  try {
-    const dn = world.systems && world.systems.daynight;
-    if (dn && typeof dn.setTime === 'function') dn.setTime(hours);
-  } catch (error) {
-    console.warn('[shots] setTime failed during staging', error);
-  }
-}
-
-/**
- * Set `world` to the named scene and return the screen to draw over it.
- * Unknown names stage the plain drive scene.
- */
-export function stageShot(name, world) {
-  const systems = world.systems || {};
-  world.mode = 'play';
-  world.time = 0;
-  world.wanted = 0;
-  world.cash = 1250;
-  if (world.player) world.player.health = 100;
-  if (world.input && world.input.keys) world.input.keys.clear();
-  if (world.events) world.events.length = 0;
-
-  // Let the city, traffic and pedestrians settle before the scene starts.
-  warmUp(world, 2);
-
-  if (name === 'chase') {
-    // Dusk chase: golden low sun, wanted 4, police closing in AND the
-    // helicopter overhead, with a spike strip laid across the road ahead.
-    // The police AI places the strip itself on the first step after the
-    // heat goes up (its cooldown starts long expired).
-    setClock(world, 17.6);
-    putPlayerInCar(world, -180, 0, Math.PI / 2);
-    try {
-      if (systems.police && typeof systems.police.addWanted === 'function') systems.police.addWanted(4);
-    } catch (error) {
-      console.warn('[shots] addWanted failed during staging', error);
-    }
-    const target = new THREE.Vector3(232, 0, 0);
-    const steps = Math.round(CHASE_SECONDS / STEP);
-    for (let i = 0; i < steps; i += 1) {
-      driveToward(world, target);
-      stepWorld(world, STEP);
-    }
-    // Foot off the gas before placing the police: with W still held the car
-    // would coast away from them in the steps that sync their meshes.
-    if (world.input && world.input.keys) world.input.keys.clear();
-    // Park two police cars right on Rico's tail for the frame: the police
-    // system (when it lands) chases for real; until then, place them where
-    // a chase would have them — pulling alongside the player's car, in frame
-    // at the edges, not hidden behind the chase camera.
-    try {
-      if (systems.vehicles && typeof systems.vehicles.spawnCar === 'function') {
-        const pos = focusPos(world);
-        const heading = focusHeading(world);
-        const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
-        const side = new THREE.Vector3(Math.cos(heading), 0, -Math.sin(heading));
-        const spots = [
-          { along: -4, across: -6.5 },
-          { along: 2, across: 6.5 },
-        ];
-        for (const spot of spots) {
-          const at = pos.clone().addScaledVector(forward, spot.along).addScaledVector(side, spot.across);
-          systems.vehicles.spawnCar('police', at, heading, 0x1a1a2e);
-        }
+  function stageDrive() {
+    world.mode = 'play';
+    world.wanted = 0;
+    world.cash = 1850;
+    if (world.player) world.player.cash = 1850;
+    world.mission = {
+      id: 0,
+      stage: 0,
+      objective: 'Street race: thread the Docks container rows to the finish line.',
+      marker: { x: -180, z: -180 },
+      timer: 0,
+    };
+    const player = world.player;
+    if (player) {
+      const bike = (world.bikes || [])[0] || null;
+      if (bike) {
+        player.bike = bike;
+        player.onFoot = false;
       }
-    } catch (error) {
-      console.warn('[shots] police spawn failed during staging', error);
+      placePlayer(-232, -232, Math.PI * 0.75, 17);
+      player.wheelie = true;
     }
-    // Helicopter chase: the heli must be placed AFTER the last stepWorld
-    // below — heli.update respawns an inactive heli 60 m above the player
-    // (out of the camera frame), so placing it before the step is undone.
-    // One step first, to sync the new meshes; then park the heli ~40 m
-    // ahead of the player, 14 m up — low enough to sit inside the chase
-    // camera's frame (the camera looks ~21° down, so 26 m up is above
-    // the top edge) — and run one heli.update so its spotlight cone and
-    // ground disc recompute at that altitude.
-    stepWorld(world, STEP);
-    try {
-      const heli = systems.helicopter;
-      if (heli) {
-        const pos = focusPos(world);
-        const heading = focusHeading(world);
-        const forward = new THREE.Vector3(Math.sin(heading), 0, Math.cos(heading));
-        const ahead = pos.clone().addScaledVector(forward, 40);
-        ahead.y = 14;
-        if (heli.pos && typeof heli.pos.set === 'function') heli.pos.set(ahead.x, ahead.y, ahead.z);
-        else heli.pos = ahead;
-        if (heli.mesh) heli.mesh.position.copy(ahead);
-        if (typeof heli.update === 'function') heli.update(STEP);
-      }
-    } catch (error) {
-      console.warn('[shots] helicopter staging failed', error);
-    }
-  } else if (name === 'foot') {
-    // Midnight at the lighthouse: Rico on foot on the south-west beach,
-    // facing the striped tower while its beam sweeps the coast. The
-    // clock is jumped to night first so the lamps, the beam and the
-    // stars are all lit; the warm-up already ran, so peds are around.
-    // Rico stands ~35 m back from the tower so the whole lighthouse
-    // fits the frame instead of filling one corner of it.
-    setClock(world, 23.2);
-    putPlayerOnFoot(world, -242, 278, Math.atan2(-28, 22));
-    for (let i = 0; i < 30; i += 1) stepWorld(world, STEP);
-  } else if (name === 'mission') {
-    // Mission 10, Midnight Delivery: the mission itself jumps the clock
-    // to midnight and lights four blue harbour rings. Rico drives north
-    // on road x = -174 toward the first drop at the yard gate, stopping
-    // ~13 m short of the ring (outside its 10 m trigger) so the
-    // delivery does not complete mid-stage.
-    putPlayerInCar(world, -174, -196, Math.PI);
-    try {
-      if (systems.missions && typeof systems.missions.startMission === 'function') {
-        systems.missions.startMission(10);
-      }
-    } catch (error) {
-      console.warn('[shots] startMission failed during staging', error);
-    }
-    const stop = new THREE.Vector3(-174, 0, -220);
-    const steps = Math.round(MISSION_SECONDS / STEP);
-    for (let i = 0; i < steps; i += 1) {
-      driveToward(world, stop);
-      stepWorld(world, STEP);
-      if (focusPos(world).z <= -220) break;
-    }
-    // One step lets the mission system move its beacon onto the marker,
-    // then pin the frame to the delivery stage: marker at the first drop
-    // (the yard gate), ~13 m ahead of the car, outside the 10 m ring.
-    stepWorld(world, STEP);
-    if (world.mission) {
-      world.mission.id = 10;
-      world.mission.stage = 0;
-      world.mission.objective = 'Midnight Delivery — drop 1 of 4';
-      world.mission.marker = new THREE.Vector3(-170, 2, -232);
-    }
-  } else {
-    // 'drive' (and any unknown name): the Old Town Loop street race.
-    // Rico starts on road x = -174 just north of the quarter and races
-    // south past the start gantry, the townhouses and the cathedral,
-    // chasing the blue checkpoint rings down the west side of the city.
-    setClock(world, 10);
-    putPlayerInCar(world, -174, -96, 0);
-    try {
-      const acts = systems.activities;
-      if (acts && typeof acts.startRace === 'function') {
-        acts.startRace({
-          id: 'oldtown',
-          name: 'Old Town Loop',
-          prize: 600,
-          par: 75,
-          start: { x: -174, z: -58 },
-          checkpoints: [
-            { x: -174, z: -58 },
-            { x: -174, z: 116 },
-            { x: 0, z: 116 },
-            { x: 0, z: -58 },
-            { x: -174, z: -58 },
-          ],
-        });
-      }
-    } catch (error) {
-      console.warn('[shots] startRace failed during staging', error);
-    }
-    const target = new THREE.Vector3(-174, 0, 116);
-    const steps = Math.round(DRIVE_SECONDS / STEP);
-    for (let i = 0; i < steps; i += 1) {
-      driveToward(world, target);
-      stepWorld(world, STEP);
-      if (focusPos(world).z >= 116) break;
-    }
+    nearTraffic(3, -215, -215);
+    pressKeys(['KeyW', 'ShiftLeft']);
   }
 
-  if (world.input && world.input.keys) world.input.keys.clear();
-  placeCamera(world);
-  if (world.hud && typeof world.hud.update === 'function') {
-    try {
-      world.hud.update(world);
-    } catch (error) {
-      console.warn('[shots] hud.update failed during staging', error);
+  function stageFoot() {
+    world.mode = 'play';
+    world.wanted = 0;
+    world.cash = 1200;
+    if (world.player) world.player.cash = 1200;
+    world.mission = {
+      id: 1,
+      stage: 1,
+      objective: 'Steal a car and drive to the Coral Club marker.',
+      marker: { x: 58, z: 29 },
+      timer: 0,
+    };
+    placePlayer(-29, 58, Math.PI / 2, 3);
+    const player = world.player;
+    if (player) {
+      player.onFoot = true;
+      player.car = null;
+      player.bike = null;
     }
+    nearTraffic(6, -29, 58);
+    const peds = world.peds || world.pedestrians || [];
+    const rng = mulberry32(seedValue + 31);
+    for (let i = 0; i < peds.length && i < 8; i += 1) {
+      const ped = peds[i];
+      const x = -29 + (rng() - 0.5) * 70;
+      const z = 58 + (rng() - 0.5) * 70;
+      if (ped.position && ped.position.set) ped.position.set(x, 0, z);
+      else ped.position = { x, y: 0, z };
+    }
+    pressKeys(['KeyW']);
   }
-  return { screen: 'play' };
+
+  function stageMission() {
+    world.mode = 'play';
+    world.wanted = 2;
+    world.cash = 5300;
+    if (world.player) world.player.cash = 5300;
+    world.mission = {
+      id: 22,
+      stage: 2,
+      objective: 'M22 The Warehouse: defeat 4 guards, steal the ledger, escape on the bike.',
+      marker: { x: -170, z: -260 },
+      timer: 0,
+    };
+    world.revenge = {
+      active: true,
+      courierTailed: true,
+      ledgerStolen: false,
+      convoyStopped: false,
+      donDefeated: false,
+      guardsLeft: 4,
+    };
+    placePlayer(-186, -238, Math.PI, 2);
+    const player = world.player;
+    if (player) {
+      player.onFoot = true;
+      player.car = null;
+      player.bike = null;
+    }
+    const bikes = world.bikes || [];
+    if (bikes.length > 0) {
+      const bike = bikes[0];
+      if (bike.position && bike.position.set) bike.position.set(-178, 0, -232);
+      else bike.position = { x: -178, y: 0, z: -232 };
+      if (bike.mesh && bike.mesh.position && bike.mesh.position.set) bike.mesh.position.set(-178, 0, -232);
+    }
+    nearPolice(2, -186, -238, Math.PI);
+    pressKeys(['KeyW']);
+  }
+
+  function pressKeys(codes) {
+    const input = world.input;
+    if (!input || !input.keys) return;
+    for (const code of codes) input.keys.add(code);
+  }
+
+  function chaseCamera() {
+    const camera = world.camera;
+    const player = world.player;
+    if (!camera || !player || !player.position) return;
+    const heading = player.heading || 0;
+    const dist = player.bike ? 9 : 12;
+    const height = player.bike ? 4.5 : 5.5;
+    const px = player.position.x;
+    const pz = player.position.z;
+    const cx = px - Math.sin(heading) * dist;
+    const cz = pz - Math.cos(heading) * dist;
+    if (camera.position && camera.position.set) camera.position.set(cx, height, cz);
+    if (camera.lookAt) camera.lookAt(px, 1.5, pz);
+  }
+
+  const shots = {
+    name: active,
+    staged: false,
+    frames: 0,
+    ready: false,
+    update() {
+      if (!active) return;
+      if (!shots.staged) {
+        if (shotName === 'chase') stageChase();
+        else if (shotName === 'drive') stageDrive();
+        else if (shotName === 'foot') stageFoot();
+        else if (shotName === 'mission') stageMission();
+        shots.staged = true;
+        world.shotName = shotName;
+      }
+      chaseCamera();
+      shots.frames += 1;
+      if (shots.frames >= 2 && !shots.ready) {
+        shots.ready = true;
+        world.shotReady = true;
+        window.__shotReady = true;
+        document.body.dataset.shotReady = 'true';
+        document.title = 'Solmar City — shot ' + shotName;
+        if (Array.isArray(world.events)) world.events.push({ type: 'shot-ready', shot: shotName });
+      }
+    },
+  };
+
+  world.shots = shots;
+  return shots;
 }

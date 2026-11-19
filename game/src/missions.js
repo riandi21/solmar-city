@@ -1,921 +1,329 @@
-// Missions for Solmar City — Rico Vega owes $5,000 to Madame Coral.
-// Missions 1-4 pay the debt down exactly ($500 + $800 + $1,200 + $2,500).
-// Missions 5-8 are the second arc: the debt is paid, but the rival Dourado
-// gang moves on Coral's turf, and Coral hires Rico to defend it and take
-// the city for himself. Missions run in order, one after another: mission 1
-// starts when the game starts, and finishing one starts the next after a
-// short celebration pause.
-//
-// The factory owns the 3D beacon (a gold disc + a vertical light beam) and
-// keeps world.mission up to date; the HUD and the minimap read that object
-// directly, so no other system needs to know about mission internals.
-//
-// Shared state this module touches (see BUILD-NOTES.md):
-//   world.mission = { id, stage, objective, marker, timer }
-//   world.cash / world.player.cash — paid on completion
-//   world.wanted — set by missions 3 and 4
-//   world.player.ammo — refilled to 24 at every mission start
-//   world.missionsDone — array of finished mission ids, shared with save.js
-//   world.hud?.showMessage(text), world.audio?.jingle() — optional hooks
-//   world.peds — the two crew members for mission 4 are added here
 import * as THREE from 'three';
 
-export const DEBT_TOTAL = 5000;
+// Missions 1-8: Rico's opening jobs and the first Dourado arc.
+// Factory: createMissions(world) -> { startMission(id), update(dt) }.
+// Mission state lives on world.mission; finished ids go to
+// world.completedMissions; rewards land in world.player.cash.
 
-// Fixed mission spots, all on (or just off) roads so the player can reach
-// them by car. The Coral Club tower stands at block centre (29,29), so its
-// marker waits on the road along its east face, and its penthouse door is on
-// that same face a few metres closer in. The yacht itself floats in
-// the marina basin (a car collider), so its marker waits on land at the
-// marina entrance, beside the middle pier. The freight yard sits at the
-// north-west corner of the city; the boardwalk and pier run along the south
-// beach edge; the safehouse is on the road at the south-west corner.
-// District spots below are fallbacks: at mission start each named spot is
-// re-resolved from world.systems.city.districts when the city system
-// exposes it, so the markers follow the city worker's layout.
-export const SPOTS = {
-  coralClub: { x: 58, z: 29 },
-  penthouse: { x: 51, z: 29 },
-  courierDrops: [
-    { x: -174, z: 116 },
-    { x: 116, z: -174 },
-    { x: 0, z: 174 },
-  ],
-  crew: [
-    { x: 232, z: 58 },
-    { x: 174, z: 232 },
-  ],
-  yacht: { x: 255, z: 160 },
-  freightYard: { x: -170, z: -260 },
-  boardwalk: { x: 0, z: 264 },
-  pier: { x: 0, z: 318 },
-  safehouse: { x: -174, z: 232 },
-  // v3 — Harbor War spots (resolved from the harborWar system when it
-  // exists, so the arc follows its own layout table).
-  yardGate: { x: -170, z: -232 },
-  marinaGate: { x: 232, z: 160 },
-  pierRoad: { x: 0, z: 290 },
-  lighthouseRoad: { x: -232, z: 232 },
-  lighthouse: { x: -270, z: 300 },
-  oldTown: { x: -203, z: -58 },
-};
+const CORAL_CLUB = { x: 58, z: 29 };
+const YACHT = { x: 295, z: 168 };
+const SAFEHOUSE = { x: -174, z: 232 };
+const ANCHOR_BAR = { x: 100, z: 60 };
 
-const MISSIONS = [
-  {
-    id: 1,
-    name: 'First Wheels',
-    reward: 500,
-    intro: 'First Wheels — steal a car, then drive to the Coral Club.',
-  },
-  {
-    id: 2,
-    name: 'Courier Run',
-    reward: 800,
-    timeLimit: 150,
-    intro: 'Courier Run — deliver 3 packages in 150 seconds.',
-  },
-  {
-    id: 3,
-    name: 'Hot Pursuit',
-    reward: 1200,
-    timeLimit: 60,
-    intro: 'Hot Pursuit — survive 60 seconds at 3 stars.',
-  },
-  {
-    id: 4,
-    name: 'The Marina Job',
-    reward: 2500,
-    intro: 'The Marina Job — pick up your crew, then reach the yacht.',
-  },
-  {
-    id: 5,
-    name: 'Dourado Moves In',
-    reward: 1500,
-    intro: 'Dourado Moves In — the rival gang is at the freight yard. Drive there and run them off.',
-  },
-  {
-    id: 6,
-    name: 'The Port Run',
-    reward: 2000,
-    timeLimit: 180,
-    intro: 'The Port Run — 3 drops in 180 seconds: the yard, the boardwalk, the marina.',
-  },
-  {
-    id: 7,
-    name: 'Five-Star Heat',
-    reward: 2500,
-    timeLimit: 75,
-    intro: 'Five-Star Heat — survive 75 seconds at 5 stars. Don\'t lose the heat.',
-  },
-  {
-    id: 8,
-    name: 'The Coral Takeover',
-    reward: 3000,
-    intro: 'The Coral Takeover — gather your crew, take the tower, take the city.',
-  },
-  // v3 — The Harbor War arc (missions 9-12, $20,000): the Dourado make
-  // one last play for the harbour, and Coral sends Rico to end it.
-  // The mechanics live in missions3.js (harborWar); this file owns the
-  // flow — stages, markers, timers, rewards — and calls in through
-  // harborWarSystem() below.
-  {
-    id: 9,
-    name: 'Harbor Escort',
-    reward: 4000,
-    intro: 'Harbor Escort — a Coral truck is rolling to the marina. Stay with it.',
-  },
-  {
-    id: 10,
-    name: 'Midnight Delivery',
-    reward: 4500,
-    timeLimit: 150,
-    intro: 'Midnight Delivery — 4 harbour drops in 150 seconds. At midnight.',
-  },
-  {
-    id: 11,
-    name: 'Harbor Takedown',
-    reward: 5500,
-    intro: 'Harbor Takedown — three Dourado cars on the pier road. Ram them off it.',
-  },
-  {
-    id: 12,
-    name: 'The Harbor War',
-    reward: 6000,
-    intro: 'The Harbor War — clear the pier squad, then take the lighthouse.',
-  },
-];
-
-const ARRIVE_DIST = 12; // metres from a marker that count as "arrived"
-const PICKUP_DIST = 4; // metres from a crew member that count as "picked up"
-const CELEBRATE_SECS = 3; // pause between missions
-
-function distXZ(a, b) {
+function dist2D(a, b) {
   const dx = a.x - b.x;
   const dz = a.z - b.z;
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-function atSpot(pos, spot) {
-  return distXZ(pos, spot) <= ARRIVE_DIST;
+function nearPlayer(world, pos, radius) {
+  if (!world.player || !world.player.position) return false;
+  return dist2D(world.player.position, pos) <= radius;
 }
 
-function makeBeaconMesh() {
-  // A flat gold disc on the ground plus a tall translucent beam, grouped so
-  // the whole beacon can be moved to the active marker in one step.
-  const group = new THREE.Group();
-  const discMat = new THREE.MeshBasicMaterial({
-    color: 0xffd34d,
-    transparent: true,
-    opacity: 0.85,
-    depthWrite: false,
-  });
-  const disc = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 0.25, 24), discMat);
-  disc.position.y = 0.15;
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: 0xffd34d,
-    transparent: true,
-    opacity: 0.35,
-    depthWrite: false,
-  });
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 32, 12, 1, true), beamMat);
-  beam.position.y = 16.25;
-  group.add(disc);
-  group.add(beam);
-  group.visible = false;
-  return { group, discMat, beamMat };
-}
-
-function makeCrewMesh() {
-  // A simple orange-shirted figure, clearly different from street peds.
-  const group = new THREE.Group();
-  const shirt = new THREE.Mesh(
-    new THREE.BoxGeometry(0.7, 0.9, 0.4),
-    new THREE.MeshBasicMaterial({ color: 0xff7a1a }),
-  );
-  shirt.position.y = 1.05;
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 10, 8),
-    new THREE.MeshBasicMaterial({ color: 0xe8b88a }),
-  );
-  head.position.y = 1.75;
-  const legs = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.7, 0.35),
-    new THREE.MeshBasicMaterial({ color: 0x223344 }),
-  );
-  legs.position.y = 0.35;
-  group.add(shirt);
-  group.add(head);
-  group.add(legs);
-  return group;
+function inVehicle(world) {
+  if (!world.player) return false;
+  return !!(world.player.currentCar || world.player.currentBike || world.player.car);
 }
 
 export function createMissions(world) {
-  const defs = new Map(MISSIONS.map((m) => [m.id, m]));
-  const beacon = makeBeaconMesh();
-  if (world.scene) world.scene.add(beacon.group);
+  let marker = null;
+  let enemies = [];
+  let defeated = 0;
+  let stageData = {};
 
-  const state = {
-    current: 0, // id of the running mission, 0 = none yet
-    stage: 0,
-    missionsDone: [],
-    debtLeft: DEBT_TOTAL,
-    allDone: false,
-    celebrate: 0, // seconds left in the post-mission pause
-    failMessage: '',
-  };
-  // Save.js reads this same array reference; keep it on the world so the
-  // save system never needs to import this module.
-  world.missionsDone = state.missionsDone;
+  function clearMarker() {
+    if (marker && world.scene) world.scene.remove(marker);
+    marker = null;
+  }
 
-  function setObjective(text) {
+  function clearEnemies() {
+    for (const e of enemies) {
+      if (e.mesh && world.scene) world.scene.remove(e.mesh);
+    }
+    enemies = [];
+    defeated = 0;
+  }
+
+  // Small shared marker helper: floating beacon (cylinder + light beam).
+  function makeMarker(pos) {
+    clearMarker();
+    const group = new THREE.Group();
+    const ring = new THREE.Mesh(
+      new THREE.CylinderGeometry(3, 3, 0.4, 24),
+      new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.55 })
+    );
+    ring.position.y = 0.2;
+    const beam = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.7, 0.7, 36, 12, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
+    );
+    beam.position.y = 18;
+    group.add(ring);
+    group.add(beam);
+    group.position.set(pos.x, 0, pos.z);
+    if (world.scene) world.scene.add(group);
+    marker = group;
+    return group;
+  }
+
+  function setObjective(text, markerPos) {
+    if (!world.mission) world.mission = {};
     world.mission.objective = text;
-    try {
-      if (world.hud) world.hud.setObjective(text);
-    } catch (err) {
-      // The HUD is optional; a broken HUD hook never blocks the mission.
-    }
+    world.mission.marker = markerPos ? new THREE.Vector3(markerPos.x, 0, markerPos.z) : null;
+    if (markerPos) makeMarker(markerPos);
+    else clearMarker();
   }
 
-  function setMarker(spot) {
-    if (!spot) {
+  function finish(reward) {
+    const id = world.mission ? world.mission.id : 0;
+    if (world.player) world.player.cash = (world.player.cash || 0) + reward;
+    if (world.completedMissions && !world.completedMissions.includes(id)) {
+      world.completedMissions.push(id);
+    }
+    if (world.events) world.events.push({ type: 'missionComplete', id, reward });
+    clearMarker();
+    clearEnemies();
+    if (world.mission) {
+      world.mission.id = 0;
+      world.mission.stage = 0;
+      world.mission.objective = 'No active mission. Visit a mission marker to start the next job.';
       world.mission.marker = null;
-      return;
+      world.mission.timer = 0;
     }
-    if (world.mission.marker) {
-      world.mission.marker.set(spot.x, 0, spot.z);
-    } else {
-      world.mission.marker = new THREE.Vector3(spot.x, 0, spot.z);
+    stageData = {};
+  }
+
+  function fail(reason) {
+    clearMarker();
+    clearEnemies();
+    if (world.events) world.events.push({ type: 'missionFailed', id: world.mission ? world.mission.id : 0, reason });
+    if (world.mission) {
+      world.mission.id = 0;
+      world.mission.stage = 0;
+      world.mission.objective = reason + ' Mission failed — try again.';
+      world.mission.marker = null;
+      world.mission.timer = 0;
+    }
+    stageData = {};
+  }
+
+  function spawnEnemies(count, center, spread) {
+    clearEnemies();
+    if (world.systems && world.systems.combat && typeof world.systems.combat.spawnGangSquad === 'function') {
+      try {
+        const squad = world.systems.combat.spawnGangSquad(center, count) || [];
+        enemies = squad.map((m) => ({ mesh: m, pos: m.position || center, hp: 3, dwell: 0 }));
+        return;
+      } catch (err) { /* fall through to simple markers */ }
+    }
+    for (let i = 0; i < count; i++) {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 1.7, 0.5),
+        new THREE.MeshStandardMaterial({ color: 0x8a1f1f })
+      );
+      body.position.y = 0.85;
+      const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 10, 8),
+        new THREE.MeshStandardMaterial({ color: 0xd9a066 })
+      );
+      head.position.y = 1.95;
+      g.add(body);
+      g.add(head);
+      const px = center.x + (world.rng ? (world.rng() - 0.5) * spread : (i - count / 2) * 4);
+      const pz = center.z + (world.rng ? (world.rng() - 0.5) * spread : (i % 2) * 5);
+      g.position.set(px, 0, pz);
+      if (world.scene) world.scene.add(g);
+      enemies.push({ mesh: g, pos: g.position, hp: 3, dwell: 0 });
     }
   }
 
-  function announce(text) {
-    try {
-      if (world.hud) world.hud.showMessage(text);
-    } catch (err) {
-      // The HUD is optional; a broken HUD hook never blocks the mission.
-    }
-  }
-
-  function refillAmmo() {
-    if (world.player) world.player.ammo = 24;
-  }
-
-  // Named spots prefer the city system's district table when it exists,
-  // otherwise the hardcoded SPOTS fallbacks above. Every cross-system read
-  // here is guarded: a missing city system just means the fallbacks win.
-  function districtSpot(name) {
-    try {
-      const districts = world.systems && world.systems.city && world.systems.city.districts;
-      const hit = districts && districts[name];
-      if (hit && typeof hit.x === 'number' && typeof hit.z === 'number') {
-        return { x: hit.x, z: hit.z };
+  // Close-quarters takedown: stand next to a guard briefly to beat him
+  // down. Also honours combat kill events if the combat system reports them.
+  function updateEnemies(dt, onAllDown) {
+    if (!enemies.length) return;
+    for (const e of enemies) {
+      if (e.hp <= 0) continue;
+      const d = world.player && world.player.position ? dist2D(world.player.position, e.pos) : 999;
+      if (d < 4) {
+        e.dwell += dt;
+        if (e.dwell > 1.2) {
+          e.hp = 0;
+          defeated += 1;
+          if (e.mesh && world.scene) world.scene.remove(e.mesh);
+          if (world.events) world.events.push({ type: 'enemyDown' });
+        }
+      } else {
+        e.dwell = 0;
       }
-    } catch (err) {
-      // Fall through to the hardcoded spot below.
-    }
-    return SPOTS[name];
-  }
-
-  function squadAround(centre, offsets) {
-    return offsets.map(([dx, dz]) => ({ x: centre.x + dx, z: centre.z + dz }));
-  }
-
-  // The rival-squad combat API lives in another worker's file and may not
-  // exist yet. Every call is guarded; a missing API means the mission falls
-  // back to its drive-to objective instead of soft-locking.
-  function combatSystem() {
-    try {
-      return (world.systems && world.systems.combat) || null;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function trySpawnRivals(spots) {
-    const combat = combatSystem();
-    if (!combat || typeof combat.spawnRivalSquad !== 'function') return false;
-    try {
-      combat.spawnRivalSquad(spots);
-      return true;
-    } catch (err) {
-      return false;
-    }
-  }
-
-  // v3 — the Harbor War finale (mission 12) fields an elite squad: the
-  // combat system doubles their health and sharpens their aim.
-  function trySpawnEliteRivals(spots) {
-    const combat = combatSystem();
-    if (!combat || typeof combat.spawnRivalSquad !== 'function') return false;
-    try {
-      combat.spawnRivalSquad(spots, { elite: true });
-      return true;
-    } catch (err) {
-      return false;
-    }
-  }
-
-  // How many rivals are still standing, or null when the combat system
-  // cannot answer (no API, or a bad return value).
-  function rivalsLeft() {
-    const combat = combatSystem();
-    if (!combat || typeof combat.rivalsRemaining !== 'function') return null;
-    try {
-      const n = combat.rivalsRemaining();
-      return typeof n === 'number' ? n : null;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  // The Harbor War mechanics (missions 9-12) live in missions3.js.
-  // Every call is guarded like the combat ones: a missing system means
-  // the mission falls back to a drive-to objective instead of locking.
-  function harborWarSystem() {
-    try {
-      return (world.systems && world.systems.missions3) || null;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  function harborSpot(name) {
-    try {
-      const war = harborWarSystem();
-      const spots = war && war.harborSpots;
-      const hit = spots && spots[name];
-      if (hit && typeof hit.x === 'number' && typeof hit.z === 'number') {
-        return { x: hit.x, z: hit.z };
+      // Guards shuffle toward Rico when he is close.
+      if (d < 30 && d > 3 && e.mesh) {
+        const dx = world.player.position.x - e.pos.x;
+        const dz = world.player.position.z - e.pos.z;
+        const len = Math.sqrt(dx * dx + dz * dz) || 1;
+        e.pos.x += (dx / len) * dt * 2.2;
+        e.pos.z += (dz / len) * dt * 2.2;
       }
-    } catch (err) {
-      // Fall through to the hardcoded spot below.
     }
-    return SPOTS[name];
+    if (defeated >= enemies.length && enemies.length > 0) onAllDown();
   }
 
   function startMission(id) {
-    const def = defs.get(id);
-    if (!def) return false;
-    state.current = id;
-    state.stage = 0;
-    state.celebrate = 0;
-    refillAmmo();
-    // Resolve the arc-2 spots fresh for this mission so markers follow the
-    // city layout whenever the city system exposes its district table.
-    state.yardSpot = districtSpot('freightYard');
-    state.clubSpot = districtSpot('coralClub');
-    state.penthouseSpot = districtSpot('penthouse');
-    state.safehouseSpot = districtSpot('safehouse');
-    state.portDrops = [
-      districtSpot('freightYard'),
-      districtSpot('boardwalk'),
-      districtSpot('yacht'),
-    ];
-    state.yardSquad = squadAround(state.yardSpot, [[8, 8], [-8, -8], [16, 0]]);
-    state.towerSquad = squadAround(state.clubSpot, [[0, -9], [0, 11], [-18, 29]]);
-    // v3 — Harbor War spots, resolved fresh like the arc-2 spots above.
-    state.yardGateSpot = harborSpot('yardGate');
-    state.marinaGateSpot = harborSpot('marinaGate');
-    state.pierRoadSpot = harborSpot('pierRoad');
-    state.lighthouseSpot = harborSpot('lighthouse');
-    state.lighthouseRoadSpot = harborSpot('lighthouseRoad');
-    state.pierSquad = squadAround(state.pierRoadSpot, [[0, -12], [10, 6], [-10, 6]]);
-    state.safehouseCrewSpots = [
-      { x: state.safehouseSpot.x, z: state.safehouseSpot.z - 6 },
-      { x: state.safehouseSpot.x + 6, z: state.safehouseSpot.z },
-    ];
+    if (!world.mission) world.mission = {};
+    clearMarker();
+    clearEnemies();
+    stageData = {};
     world.mission.id = id;
     world.mission.stage = 0;
-    world.mission.timer = def.timeLimit || 0;
-    if (id === 1) {
-      setMarker(null);
-      setObjective('Steal a car — walk up to one and press E.');
-    } else if (id === 2) {
-      setMarker(SPOTS.courierDrops[0]);
-      setObjective('Courier Run — deliver package 1 of 3.');
-    } else if (id === 3) {
-      world.wanted = 3;
-      setMarker(null);
-      setObjective('Hot Pursuit — survive 60s with the cops on you!');
-    } else if (id === 4) {
-      spawnCrew();
-      setMarker(SPOTS.crew[0]);
-      setObjective('The Marina Job — pick up crew member 1 of 2.');
-    } else if (id === 5) {
-      setMarker(state.yardSpot);
-      setObjective('Dourado Moves In — drive to the freight yard.');
-    } else if (id === 6) {
-      setMarker(state.portDrops[0]);
-      setObjective('The Port Run — drop 1 of 3. 180 seconds!');
-    } else if (id === 7) {
-      world.wanted = 5;
-      setMarker(null);
-      setObjective('Five-Star Heat — survive 75s at 5 stars!');
-    } else if (id === 8) {
-      spawnCrew(state.safehouseCrewSpots);
-      setMarker(state.safehouseCrewSpots[0]);
-      setObjective('The Coral Takeover — pick up crew member 1 of 2 at the safehouse.');
-    } else if (id === 9) {
-      // Escort: the truck rolls from the yard gate; Rico just has to stay
-      // with it. Without the harborWar system, drive to the marina gate.
-      const war = harborWarSystem();
-      const started = war && typeof war.beginEscort === 'function' && war.beginEscort();
-      setMarker(state.marinaGateSpot);
-      setObjective('Harbor Escort — stay with the Coral truck to the marina.');
-      if (!started) setObjective('Harbor Escort — drive to the marina gate.');
-    } else if (id === 10) {
-      // Midnight run: jump the clock to midnight, then four drops.
-      try {
-        if (world.systems && world.systems.daynight && typeof world.systems.daynight.skipToNight === 'function') {
-          world.systems.daynight.skipToNight();
-        }
-      } catch (err) {
-        // The delivery still runs in daylight.
-      }
-      const war = harborWarSystem();
-      const started = war && typeof war.beginDelivery === 'function' && war.beginDelivery();
-      const first = (war && war.harborSpots && war.harborSpots.deliveryDrops && war.harborSpots.deliveryDrops[0]) || state.yardGateSpot;
-      setMarker(first);
-      setObjective('Midnight Delivery — drop 1 of 4. 150 seconds!');
-      if (!started) setObjective('Midnight Delivery — reach the yard gate.');
-    } else if (id === 11) {
-      const war = harborWarSystem();
-      const started = war && typeof war.beginTakedown === 'function' && war.beginTakedown();
-      setMarker(state.pierRoadSpot);
-      setObjective('Harbor Takedown — ram the three Dourado cars off the pier road!');
-      if (!started) setObjective('Harbor Takedown — drive to the pier road.');
-    } else if (id === 12) {
-      // Finale: a rival squad holds the pier; then the lighthouse.
-      setMarker(state.pierRoadSpot);
-      setObjective('The Harbor War — clear the Dourado squad at the pier!');
+    world.mission.timer = 0;
+    if (world.systems && world.systems.combat && typeof world.systems.combat.refillAmmo === 'function') {
+      try { world.systems.combat.refillAmmo(); } catch (err) { /* ammo refill is optional */ }
     }
-    announce(`${def.name}: ${def.intro}`);
+    switch (id) {
+      case 1:
+        setObjective('Steal a car (press E near one), then drive to the Coral Club.', CORAL_CLUB);
+        break;
+      case 2:
+        stageData.stops = [{ x: 58, z: 116 }, { x: -58, z: -58 }, { x: 116, z: 174 }];
+        stageData.stopIndex = 0;
+        world.mission.timer = 150;
+        setObjective('Deliver package 1 of 3 — 150 seconds on the clock.', stageData.stops[0]);
+        break;
+      case 3:
+        world.wanted = 3;
+        world.mission.timer = 60;
+        setObjective('Survive a 3-star wanted level for 60 seconds. Keep moving!', null);
+        break;
+      case 4:
+        stageData.crew = [{ x: SAFEHOUSE.x, z: SAFEHOUSE.z, got: false }, { x: ANCHOR_BAR.x, z: ANCHOR_BAR.z, got: false }];
+        stageData.picked = 0;
+        setObjective('Pick up your crew: first at the safehouse.', stageData.crew[0]);
+        break;
+      case 5:
+        setObjective('Dourado job: pick up the crew at the Anchor Bar, then drive to the Coral Club.', ANCHOR_BAR);
+        break;
+      case 6:
+        stageData.stops = [{ x: -116, z: 58 }, { x: 174, z: -116 }];
+        stageData.stopIndex = 0;
+        world.mission.timer = 120;
+        setObjective('Dourado delivery: drop 1 of 2 — 120 seconds.', stageData.stops[0]);
+        break;
+      case 7:
+        spawnEnemies(3, { x: -170, z: -200 }, 18);
+        setObjective('Dourado ambush: take down all 3 guards at the freight yard.', { x: -170, z: -200 });
+        break;
+      case 8:
+        spawnEnemies(2, CORAL_CLUB, 12);
+        setObjective('Finale: clear the Coral Club entrance, then reach the penthouse marker.', CORAL_CLUB);
+        break;
+      default:
+        return false;
+    }
     return true;
   }
 
-  function spawnCrew(spots) {
-    // Crew members wait on the street as peds with a crew flag; walking up
-    // to one collects them. They are removed from world.peds on pickup.
-    // Defaults to the mission-4 crew spots; mission 8 passes its own list.
-    const list = spots || SPOTS.crew;
-    for (const spot of list) {
-      const mesh = makeCrewMesh();
-      mesh.position.set(spot.x, 0, spot.z);
-      if (world.scene) world.scene.add(mesh);
-      const ped = {
-        mesh,
-        pos: mesh.position,
-        heading: 0,
-        speed: 0,
-        state: 'idle',
-        crew: true,
-        pickedUp: false,
-      };
-      world.peds.push(ped);
-    }
-    state.crewList = world.peds.filter((p) => p.crew && !p.pickedUp);
-  }
-
-  function removeCrewPed(ped) {
-    ped.pickedUp = true;
-    if (world.scene && ped.mesh) world.scene.remove(ped.mesh);
-    const i = world.peds.indexOf(ped);
-    if (i >= 0) world.peds.splice(i, 1);
-  }
-
-  function completeMission() {
-    const def = defs.get(state.current);
-    if (!def) return;
-    world.cash += def.reward;
-    if (world.player) world.player.cash = world.cash;
-    state.debtLeft = Math.max(0, state.debtLeft - def.reward);
-    state.missionsDone.push(def.id);
-    // Missions 1-4 pay the debt down; from mission 5 on the debt is gone
-    // and the reward just adds to Rico's cash.
-    let doneText = `MISSION COMPLETE +$${def.reward}`;
-    if (def.id <= 4) {
-      doneText += ` — debt left: $${state.debtLeft}`;
-      if (def.id === 4) {
-        doneText += `. Debt paid — but the Dourado gang is moving on Coral's turf, and she needs you again.`;
-      }
-    } else {
-      doneText += ` — cash: $${world.cash}`;
-    }
-    announce(doneText);
-    try {
-      if (world.audio) world.audio.jingle();
-    } catch (err) {
-      // Sound is optional; a missing or broken audio hook never blocks play.
-    }
-    if (world.events) world.events.push({ type: 'mission-complete', data: { id: def.id, reward: def.reward } });
-    world.mission.id = 0;
-    world.mission.stage = 0;
-    world.mission.objective = '';
-    world.mission.timer = 0;
-    setMarker(null);
-    if (state.missionsDone.length >= MISSIONS.length) {
-      state.allDone = true;
-      state.current = 0;
-      announce('THE HARBOR WAR — the Dourado are finished, the lighthouse is Coral\'s, and Solmar City is yours, Rico.');
-      return;
-    }
-    state.current = 0;
-    state.celebrate = CELEBRATE_SECS;
-  }
-
-  function failMission(reason) {
-    const def = defs.get(state.current);
-    announce(`${reason} — ${def ? def.name : 'mission'} restarts.`);
-    if (world.events) world.events.push({ type: 'mission-failed', data: { id: state.current, reason } });
-    // Clean up anything the failed attempt left behind before restarting.
-    if (state.current === 4 || state.current === 8) {
-      for (const ped of [...world.peds]) if (ped.crew) removeCrewPed(ped);
-      if (world.wanted > 0) world.wanted = 0;
-    }
-    // v3 — a failed Harbor War leg aborts its mechanics (the truck, the
-    // rings, the takedown cars) so the retry starts clean.
-    if (state.current >= 9 && state.current <= 12) {
-      try {
-        const war = harborWarSystem();
-        if (war && typeof war.abort === 'function') war.abort();
-      } catch (err) {
-        // A stuck abort never blocks the restart.
-      }
-      if (world.wanted > 0) world.wanted = 0;
-    }
-    if (state.current === 7 && world.wanted > 0) world.wanted = 0;
-    const id = state.current;
-    state.celebrate = CELEBRATE_SECS;
-    state.current = 0;
-    world.mission.id = 0;
-    state.nextAfterCelebrate = id;
-  }
-
-  function updateMission1(dt) {
-    if (state.stage === 0) {
-      // Waiting for Rico to get into any car.
-      if (world.player && world.player.car) {
-        state.stage = 1;
-        world.mission.stage = 1;
-        setMarker(SPOTS.coralClub);
-        setObjective('Drive to the Coral Club.');
-      }
-      return;
-    }
-    if (atSpot(world.player.pos, SPOTS.coralClub)) completeMission();
-  }
-
-  function updateMission2(dt) {
-    world.mission.timer -= dt;
-    if (world.mission.timer <= 0) {
-      failMission("Time's up — the packages went cold");
-      return;
-    }
-    const drop = SPOTS.courierDrops[state.stage];
-    if (drop && atSpot(world.player.pos, drop)) {
-      state.stage += 1;
-      world.mission.stage = state.stage;
-      if (state.stage >= SPOTS.courierDrops.length) {
-        completeMission();
-        return;
-      }
-      setMarker(SPOTS.courierDrops[state.stage]);
-      setObjective(`Courier Run — deliver package ${state.stage + 1} of 3.`);
-    }
-  }
-
-  function updateMission3(dt) {
-    world.mission.timer -= dt;
-    if (world.wanted < 1) {
-      failMission('You lost the cops too fast — the heat has to stay on');
-      return;
-    }
-    if (world.mission.timer <= 0) completeMission();
-  }
-
-  function beginYachtRun() {
-    state.stage = 2;
-    world.mission.stage = 2;
-    world.wanted = 2;
-    setMarker(SPOTS.yacht);
-    setObjective('Drive to the yacht at the marina — lose the cops there!');
-    announce('Crew aboard — the cops are coming. Get to the yacht!');
-  }
-
-  function updateMission4(dt) {
-    if (state.stage <= 1) {
-      // Walk up to each crew member in turn; they join once collected.
-      const crew = (state.crewList || []).filter((p) => !p.pickedUp);
-      const target = crew[0];
-      if (!target) {
-        beginYachtRun();
-        return;
-      }
-      setMarker({ x: target.pos.x, z: target.pos.z });
-      if (distXZ(world.player.pos, target.pos) <= PICKUP_DIST) {
-        removeCrewPed(target);
-        state.stage += 1;
-        world.mission.stage = state.stage;
-        if (state.stage <= 1) {
-          setObjective('The Marina Job — pick up crew member 2 of 2.');
-        } else {
-          beginYachtRun();
-        }
-      }
-      return;
-    }
-    // Stage 2: reach the yacht while wanted level 2 chases the player.
-    if (atSpot(world.player.pos, SPOTS.yacht)) completeMission();
-  }
-
-  function updateMission5(dt) {
-    if (state.stage === 0) {
-      // Drive to the freight yard; the Dourado squad is waiting there.
-      if (atSpot(world.player.pos, state.yardSpot)) {
-        const spawned = trySpawnRivals(state.yardSquad);
-        if (!spawned || rivalsLeft() === null) {
-          // No rival-squad system: reaching the yard is the job.
-          completeMission();
-          return;
-        }
-        state.stage = 1;
-        world.mission.stage = 1;
-        setMarker(state.yardSpot);
-        setObjective('Dourado Moves In — defeat the rival squad at the yard!');
-        announce('Dourado crew at the freight yard — take them down!');
-      }
-      return;
-    }
-    // Stage 1: the fight — done when no rivals are left standing.
-    const left = rivalsLeft();
-    if (left === null || left <= 0) completeMission();
-  }
-
-  function updateMission6(dt) {
-    // Timed courier, same pattern as mission 2: one stage per drop.
-    world.mission.timer -= dt;
-    if (world.mission.timer <= 0) {
-      failMission("Time's up — the port drops went cold");
-      return;
-    }
-    const drops = state.portDrops || [SPOTS.freightYard, SPOTS.boardwalk, SPOTS.yacht];
-    const drop = drops[state.stage];
-    if (drop && atSpot(world.player.pos, drop)) {
-      state.stage += 1;
-      world.mission.stage = state.stage;
-      if (state.stage >= drops.length) {
-        completeMission();
-        return;
-      }
-      setMarker(drops[state.stage]);
-      setObjective(`The Port Run — drop ${state.stage + 1} of 3.`);
-    }
-  }
-
-  function updateMission7(dt) {
-    // Same pattern as mission 3, but at 5 stars for 75 seconds — and the
-    // job is blown if the heat drops below 3 stars.
-    world.mission.timer -= dt;
-    if (world.wanted < 3) {
-      failMission('You lost the heat too fast — the five-star show needs the cops on you');
-      return;
-    }
-    if (world.mission.timer <= 0) completeMission();
-  }
-
-  function updateMission8(dt) {
-    if (state.stage === 0) {
-      // Walk up to each crew member waiting at the safehouse; they join
-      // once collected. Same walk-up pattern as mission 4.
-      const crew = (state.crewList || []).filter((p) => !p.pickedUp);
-      const target = crew[0];
-      if (!target) {
-        state.stage = 1;
-        world.mission.stage = 1;
-        setMarker(state.clubSpot);
-        setObjective('The Coral Takeover — drive to the Coral Club.');
-        return;
-      }
-      setMarker({ x: target.pos.x, z: target.pos.z });
-      if (distXZ(world.player.pos, target.pos) <= PICKUP_DIST) {
-        removeCrewPed(target);
-        const stillWaiting = (state.crewList || []).filter((p) => !p.pickedUp).length;
-        if (stillWaiting === 0) {
-          state.stage = 1;
-          world.mission.stage = 1;
-          setMarker(state.clubSpot);
-          setObjective('The Coral Takeover — drive to the Coral Club.');
-        } else {
-          setObjective('The Coral Takeover — pick up crew member 2 of 2.');
-        }
-      }
-      return;
-    }
-    if (state.stage === 1) {
-      // Drive to the Coral Club; the Dourado squad holds the tower.
-      if (atSpot(world.player.pos, state.clubSpot)) {
-        const spawned = trySpawnRivals(state.towerSquad);
-        if (!spawned || rivalsLeft() === null) {
-          // No rival-squad system: head straight for the penthouse.
-          state.stage = 3;
-          world.mission.stage = 3;
-          setMarker(state.penthouseSpot);
-          setObjective('The Coral Takeover — reach the penthouse at the tower door!');
-        } else {
-          state.stage = 2;
-          world.mission.stage = 2;
-          setMarker(state.clubSpot);
-          setObjective('The Coral Takeover — defeat the Dourado squad at the tower!');
-          announce('Dourado squad at the Coral Club — take the tower back!');
-        }
-      }
-      return;
-    }
-    if (state.stage === 2) {
-      // The fight — done when no rivals are left standing.
-      const left = rivalsLeft();
-      if (left === null || left <= 0) {
-        state.stage = 3;
-        world.mission.stage = 3;
-        setMarker(state.penthouseSpot);
-        setObjective('The Coral Takeover — reach the penthouse at the tower door!');
-        announce('Tower clear — get to the penthouse!');
-      }
-      return;
-    }
-    // Stage 3: reach the penthouse marker at the tower door to take the city.
-    if (atSpot(world.player.pos, state.penthouseSpot)) completeMission();
-  }
-
-  // --- v3: Harbor War arc (missions 9-12) ---------------------------------
-  // Each one delegates its mechanic to missions3.js and watches the
-  // status it reports; without that system, each falls back to a
-  // drive-to so the story can still finish.
-
-  function updateMission9(dt) {
-    const war = harborWarSystem();
-    if (!war || typeof war.escortStatus !== 'function') {
-      // No escort system: reaching the marina gate is the job.
-      if (atSpot(world.player.pos, state.marinaGateSpot)) completeMission();
-      return;
-    }
-    const status = war.escortStatus();
-    if (status === 'done') {
-      completeMission();
-    } else if (status === 'failed') {
-      const reason = (war.state && war.state.failReason) || 'The escort failed';
-      failMission(reason);
-    } else {
-      // Keep the marker on the truck so the minimap follows the convoy.
-      const truck = war.state && war.state.escort && war.state.escort.truck;
-      if (truck && truck.pos) setMarker({ x: truck.pos.x, z: truck.pos.z });
-      const esc = war.state && war.state.escort;
-      const dist = esc ? esc.dist : null;
-      const hull = esc && esc.ambushed ? esc.hull : null;
-      setObjective(
-        dist !== null && dist !== undefined
-          ? `Harbor Escort — stay with the truck (${Math.round(dist)} m)` +
-            (hull !== null ? ` — truck hull ${Math.max(0, hull)}%.` : '.')
-          : 'Harbor Escort — stay with the Coral truck to the marina.',
-      );
-    }
-  }
-
-  function updateMission10(dt) {
-    const war = harborWarSystem();
-    if (!war || typeof war.deliveryStatus !== 'function') {
+  function update(dt) {
+    if (!world.mission || !world.mission.id) return;
+    const id = world.mission.id;
+    if (id < 1 || id > 8) return;
+    if (world.mission.timer > 0) {
       world.mission.timer -= dt;
       if (world.mission.timer <= 0) {
-        failMission('Time\'s up — the harbour drops went cold');
-        return;
+        if (id === 2 || id === 6) { fail('Out of time.'); return; }
       }
-      if (atSpot(world.player.pos, state.yardGateSpot)) completeMission();
-      return;
     }
-    const status = war.deliveryStatus();
-    if (status === 'done') {
-      completeMission();
-    } else if (status === 'failed') {
-      const reason = (war.state && war.state.failReason) || 'The delivery failed';
-      failMission(reason);
-    } else {
-      const del = war.state && war.state.delivery;
-      const left = del ? Math.max(0, del.timer) : 0;
-      const idx = del ? del.index : 0;
-      const total = del && del.checkpoints ? del.checkpoints.length : 4;
-      world.mission.timer = left;
-      setObjective(`Midnight Delivery — drop ${idx + 1} of ${total}. ${Math.ceil(left)}s left!`);
-      // The live ring is the marker: follow the delivery's current drop.
-      const spot = del && del.checkpoints ? del.checkpoints[del.index] : null;
-      if (spot) setMarker(spot);
-    }
-  }
+    if (marker) marker.rotation.y += dt * 1.5;
 
-  function updateMission11(dt) {
-    const war = harborWarSystem();
-    if (!war || typeof war.takedownStatus !== 'function') {
-      if (atSpot(world.player.pos, state.pierRoadSpot)) completeMission();
-      return;
-    }
-    const status = war.takedownStatus();
-    if (status === 'done') {
-      completeMission();
-    } else {
-      const left = typeof war.takedownsLeft === 'function' ? war.takedownsLeft() : 3;
-      setObjective(`Harbor Takedown — ${left} Dourado car${left === 1 ? '' : 's'} left on the pier road!`);
-      setMarker(state.pierRoadSpot);
-    }
-  }
-
-  function updateMission12(dt) {
-    if (state.stage === 0) {
-      // Drive to the pier; the Dourado squad holds it.
-      if (atSpot(world.player.pos, state.pierRoadSpot)) {
-        const spawned = trySpawnEliteRivals(state.pierSquad);
-        if (!spawned || rivalsLeft() === null) {
-          state.stage = 1;
+    switch (id) {
+      case 1: {
+        if (world.mission.stage === 0 && inVehicle(world)) {
           world.mission.stage = 1;
-          setMarker(state.lighthouseSpot);
-          setObjective('The Harbor War — reach the lighthouse!');
-        } else {
-          state.stage = 1;
-          world.mission.stage = 1;
-          setMarker(state.pierRoadSpot);
-          setObjective('The Harbor War — defeat the Dourado squad at the pier!');
-          announce('Dourado squad at the pier — finish the Harbor War!');
+          setObjective('Drive to the Coral Club marker.', CORAL_CLUB);
         }
+        if (world.mission.stage === 1 && inVehicle(world) && nearPlayer(world, CORAL_CLUB, 9)) {
+          finish(500);
+        }
+        break;
       }
-      return;
+      case 2: {
+        const stop = stageData.stops[stageData.stopIndex];
+        if (stop && nearPlayer(world, stop, 8)) {
+          stageData.stopIndex += 1;
+          if (stageData.stopIndex >= stageData.stops.length) finish(800);
+          else setObjective(`Deliver package ${stageData.stopIndex + 1} of 3.`, stageData.stops[stageData.stopIndex]);
+        }
+        break;
+      }
+      case 3: {
+        if (world.mode === 'busted') { fail('Busted by the police.'); break; }
+        if (world.mission.timer <= 0) {
+          world.wanted = 0;
+          finish(1200);
+        }
+        break;
+      }
+      case 4: {
+        if (world.mission.stage === 0) {
+          const next = stageData.crew.find((c) => !c.got);
+          if (next && nearPlayer(world, next, 7)) {
+            next.got = true;
+            stageData.picked += 1;
+            if (stageData.picked >= 2) {
+              world.mission.stage = 1;
+              setObjective('Crew aboard! Drive the yacht at the marina.', YACHT);
+            } else {
+              const other = stageData.crew.find((c) => !c.got);
+              setObjective('One more crew member to pick up.', other);
+            }
+          }
+        } else if (world.mission.stage === 1) {
+          if (nearPlayer(world, YACHT, 10)) {
+            world.mission.stage = 2;
+            setObjective('Escape! Lose the heat — get to the boardwalk.', { x: 0, z: 264 });
+          }
+        } else if (nearPlayer(world, { x: 0, z: 264 }, 10)) {
+          finish(2500);
+        }
+        break;
+      }
+      case 5: {
+        if (world.mission.stage === 0 && nearPlayer(world, ANCHOR_BAR, 7)) {
+          world.mission.stage = 1;
+          setObjective('Crew picked up. Drive to the Coral Club.', CORAL_CLUB);
+        } else if (world.mission.stage === 1 && nearPlayer(world, CORAL_CLUB, 9)) {
+          finish(2000);
+        }
+        break;
+      }
+      case 6: {
+        const stop = stageData.stops[stageData.stopIndex];
+        if (stop && nearPlayer(world, stop, 8)) {
+          stageData.stopIndex += 1;
+          if (stageData.stopIndex >= stageData.stops.length) finish(3000);
+          else setObjective('Dourado delivery: drop 2 of 2.', stageData.stops[stageData.stopIndex]);
+        }
+        break;
+      }
+      case 7: {
+        updateEnemies(dt, () => finish(4000));
+        break;
+      }
+      case 8: {
+        if (world.mission.stage === 0) {
+          updateEnemies(dt, () => {
+            world.mission.stage = 1;
+            setObjective('Entrance clear. Reach the penthouse marker at the Coral Club.', { x: 29, z: 29 });
+          });
+        } else if (nearPlayer(world, { x: 29, z: 29 }, 8)) {
+          finish(5000);
+        }
+        break;
+      }
+      default:
+        break;
     }
-    if (state.stage === 1) {
-      // The fight — done when no rivals are left standing. If the squad
-      // never spawned (no combat system), this stage is the lighthouse run.
-      const left = rivalsLeft();
-      if (left === null) {
-        if (atSpot(world.player.pos, state.lighthouseSpot)) completeMission();
-        return;
-      }
-      if (left <= 0) {
-        state.stage = 2;
-        world.mission.stage = 2;
-        setMarker(state.lighthouseSpot);
-        setObjective('The Harbor War — reach the lighthouse!');
-        announce('Pier clear — get to the lighthouse!');
-      }
-      return;
-    }
-    // Stage 2: reach the lighthouse on the south-west beach.
-    if (atSpot(world.player.pos, state.lighthouseSpot)) completeMission();
   }
 
-  function update(dt) {
-    // The beacon always follows the live marker, pulsing gently so it reads
-    // from across the city. It hides when there is no marker.
-    const marker = world.mission.marker;
-    if (marker && world.mode === 'play') {
-      const t = world.time || 0;
-      const pulse = 0.5 + 0.5 * Math.sin((2 * Math.PI * t) / 1.5);
-      beacon.group.visible = true;
-      beacon.group.position.set(marker.x, 1.2 + 0.25 * Math.sin((2 * Math.PI * t) / 3), marker.z);
-      beacon.beamMat.opacity = 0.18 + 0.3 * pulse;
-      beacon.discMat.opacity = 0.6 + 0.35 * pulse;
-      const s = 1 + 0.15 * pulse;
-      beacon.group.scale.set(s, 1, s);
-    } else {
-      beacon.group.visible = false;
-    }
-
-    if (world.mode !== 'play' || state.allDone) return;
-
-    if (state.celebrate > 0) {
-      state.celebrate -= dt;
-      if (state.celebrate <= 0) {
-        const next = state.nextAfterCelebrate || Math.max(...state.missionsDone, 0) + 1;
-        state.nextAfterCelebrate = 0;
-        startMission(next);
-      }
-      return;
-    }
-
-    if (state.current === 0) {
-      // First frame of a run: mission 1 starts automatically.
-      startMission(state.missionsDone.length + 1);
-      return;
-    }
-
-    if (state.current === 1) updateMission1(dt);
-    else if (state.current === 2) updateMission2(dt);
-    else if (state.current === 3) updateMission3(dt);
-    else if (state.current === 4) updateMission4(dt);
-    else if (state.current === 5) updateMission5(dt);
-    else if (state.current === 6) updateMission6(dt);
-    else if (state.current === 7) updateMission7(dt);
-    else if (state.current === 8) updateMission8(dt);
-    else if (state.current === 9) updateMission9(dt);
-    else if (state.current === 10) updateMission10(dt);
-    else if (state.current === 11) updateMission11(dt);
-    else if (state.current === 12) updateMission12(dt);
-  }
-
-  return { update, startMission, state, beacon: beacon.group };
+  return { startMission, update };
 }

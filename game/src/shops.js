@@ -1,319 +1,243 @@
-// Shops for Solmar City — a roadside store (health + ammo) and a safehouse
-// (save + heal + lose the cops). Both are on-foot only: walk within 6 m and
-// the HUD prompt tells you the keys. Q buys, R buys ammo at the shop.
-//
-// Prices: health $150 (full heal), ammo $100 (refill to 24), safehouse
-// $300 (save + full heal + wanted cleared) with a 60 s cooldown.
-// Cash comes from world.cash and is synced back to world.player.cash.
-// Every cross-system call is guarded: no combat system, no save system,
-// no HUD — the shop still shows its sign and never throws.
 import * as THREE from 'three';
 
-export const SHOP_POS = { x: 58, z: 116 };
-export const SAFEHOUSE_POS = { x: -174, z: 232 };
-export const SHOP_RANGE = 6; // metres: close enough to buy
-export const HEALTH_PRICE = 150;
-export const AMMO_PRICE = 100;
-export const SAFEHOUSE_PRICE = 300;
-export const SAFEHOUSE_COOLDOWN = 60; // seconds between safehouse uses
-export const AMMO_FULL = 24;
-// v3 — the shop's new stock. Rifle rounds cost more than pistol rounds
-// (the R key charges by the weapon Rico is holding); a NOS canister
-// refills the boost tank outright, and the vest soaks half of every
-// hit until its 100 durability runs out (combat.js spends it).
-export const RIFLE_AMMO_PRICE = 150;
-export const NOS_PRICE = 80;
-export const ARMOR_PRICE = 250;
-export const ARMOR_DURABILITY = 100;
-const AMMO_PRICES = { pistol: 100, smg: 100, shotgun: 100, rifle: 150 };
+// Shops and the safehouse. The corner shop sells supplies, the bike shop
+// sells rides, and the safehouse saves the game, heals Rico and wipes his
+// wanted level — for a price, and only once a minute.
+const SHOP_POS = { x: 58, z: 116 };
+const SAFEHOUSE_POS = { x: -174, z: 232 };
+const BIKE_SHOP_POS = { x: 60, z: 270 };
+const SAFEHOUSE_COST = 300;
+const SAFEHOUSE_COOLDOWN = 60;
 
-const SAVE_KEY = 'solmar-city-save-v1';
+const SHOP_ITEMS = [
+  { key: 'Digit1', id: 'health', name: 'Health', price: 150 },
+  { key: 'Digit2', id: 'ammo', name: 'Ammo', price: 100 },
+  { key: 'Digit3', id: 'rifle-ammo', name: 'Rifle ammo', price: 150 },
+  { key: 'Digit4', id: 'nos', name: 'NOS refill', price: 80 },
+  { key: 'Digit5', id: 'armor', name: 'Armor', price: 250 },
+];
 
-function distXZ(a, b) {
-  const dx = a.x - b.x;
-  const dz = a.z - b.z;
-  return Math.sqrt(dx * dx + dz * dz);
+const BIKES_FOR_SALE = [
+  { key: 'Digit7', id: 'scooter', name: 'City Scooter', price: 800 },
+  { key: 'Digit8', id: 'street', name: 'Street Bike', price: 2500 },
+  { key: 'Digit9', id: 'superbike', name: 'Superbike', price: 6000 },
+];
+
+function readCash(world) {
+  if (world.player && typeof world.player.cash === 'number') return world.player.cash;
+  return typeof world.cash === 'number' ? world.cash : 0;
 }
 
-function makeBeaconDisc(color) {
-  const mat = new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.7,
-    depthWrite: false,
-  });
-  const disc = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 0.2, 24), mat);
-  disc.position.y = 0.12;
-  return { disc, mat };
+function addCash(world, amount) {
+  const next = readCash(world) + amount;
+  if (world.player) world.player.cash = next;
+  world.cash = next;
+  return next;
 }
 
-function makeShopSign(scene, pos) {
-  const group = new THREE.Group();
-  // Pole.
-  const pole = new THREE.Mesh(
-    new THREE.BoxGeometry(0.25, 3.2, 0.25),
-    new THREE.MeshBasicMaterial({ color: 0x333333 }),
-  );
-  pole.position.y = 1.6;
-  group.add(pole);
-  // Green cross: two boxes, the classic pharmacy / clinic sign.
-  const crossMat = new THREE.MeshBasicMaterial({ color: 0x2ecc40 });
-  const barV = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.6, 0.2), crossMat);
-  barV.position.y = 3.6;
-  const barH = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 0.2), crossMat);
-  barH.position.y = 3.6;
-  group.add(barV, barH);
-  group.position.set(pos.x, 0, pos.z);
-  scene.add(group);
-  return group;
+function playerPos(world) {
+  const p = world.player && world.player.position;
+  if (!p) return null;
+  return { x: p.x, y: p.y || 0, z: p.z };
 }
 
-function makeSafehouseSign(scene, pos) {
-  // A small blue roof-sign box on the house side of the safehouse spot.
-  const box = new THREE.Mesh(
-    new THREE.BoxGeometry(2.2, 0.7, 0.4),
-    new THREE.MeshBasicMaterial({ color: 0x2f7de1 }),
-  );
-  box.position.set(pos.x, 2.8, pos.z);
-  scene.add(box);
-  return box;
+function toast(world, text) {
+  if (typeof world.toast === 'function') world.toast(text);
 }
 
-export function createShops(scene, world) {
-  const shopPos = new THREE.Vector3(SHOP_POS.x, 0, SHOP_POS.z);
-  const safehousePos = new THREE.Vector3(SAFEHOUSE_POS.x, 0, SAFEHOUSE_POS.z);
+function keyDown(world, code) {
+  const input = world.input;
+  if (!input) return false;
+  if (input.pressed && typeof input.pressed.has === 'function') return input.pressed.has(code);
+  if (input.keys && typeof input.keys.has === 'function') return input.keys.has(code);
+  return !!input[code];
+}
 
-  // Shop dressing: sign + cyan beacon disc on the ground.
-  makeShopSign(scene, shopPos);
-  const shopBeacon = makeBeaconDisc(0x22d3ee);
-  shopBeacon.disc.position.set(shopPos.x, 0.12, shopPos.z);
-  scene.add(shopBeacon.disc);
-  // Safehouse dressing: blue beacon disc + roof sign.
-  const safeBeacon = makeBeaconDisc(0x2f7de1);
-  safeBeacon.disc.position.set(safehousePos.x, 0.12, safehousePos.z);
-  scene.add(safeBeacon.disc);
-  makeSafehouseSign(scene, safehousePos);
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-  const state = {
-    shopPos,
-    safehousePos,
-    lastSafehouseAt: -Infinity,
-  };
+export function createShops(world) {
+  if (!Array.isArray(world.ownedBikes)) world.ownedBikes = [];
+  let safehouseCooldown = 0;
+  let nearShop = false;
+  let nearSafehouse = false;
+  let nearBikeShop = false;
+  let wasNearShop = false;
+  let wasNearSafehouse = false;
+  let wasNearBikeShop = false;
+  let prevKeys = new Set();
 
-  // Edge-trigger memory: holding Q must buy once, not once per frame.
-  let qWasDown = false;
-  let rWasDown = false;
-  // v3: the same edge memory for the new stock — B (NOS) and V (vest).
-  let bWasDown = false;
-  let vWasDown = false;
-
-  function say(text) {
-    try {
-      if (world.hud && typeof world.hud.showMessage === 'function') world.hud.showMessage(text);
-    } catch {
-      // HUD is optional.
+  if (world.scene) {
+    const spots = [
+      { pos: SHOP_POS, color: 0x2eff8c, label: 'SHOP' },
+      { pos: SAFEHOUSE_POS, color: 0x2e86ff, label: 'HOME' },
+      { pos: BIKE_SHOP_POS, color: 0xff8c2e, label: 'BIKES' },
+    ];
+    for (const spot of spots) {
+      const marker = new THREE.Mesh(
+        new THREE.CylinderGeometry(2.2, 2.2, 6, 12, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: spot.color, transparent: true, opacity: 0.25, side: THREE.DoubleSide,
+        }),
+      );
+      marker.position.set(spot.pos.x, 3, spot.pos.z);
+      world.scene.add(marker);
     }
   }
 
-  function setPrompt(text) {
-    try {
-      if (world.hud && typeof world.hud.setPrompt === 'function') world.hud.setPrompt(text);
-    } catch {
-      // HUD is optional.
-    }
+  function pressedNow(world, code) {
+    const down = keyDown(world, code);
+    const was = prevKeys.has(code);
+    return down && !was;
   }
 
-  function jingle() {
-    try {
-      if (world.audio && typeof world.audio.jingle === 'function') world.audio.jingle();
-    } catch {
-      // Audio is optional.
+  function snapshotKeys(world) {
+    const input = world.input;
+    const next = new Set();
+    if (input) {
+      const source = input.pressed || input.keys;
+      if (source && typeof source.forEach === 'function') source.forEach((k) => next.add(k));
     }
+    prevKeys = next;
   }
 
-  function pay(price) {
-    if ((world.cash || 0) < price) {
-      say(`Not enough cash — $${price} needed.`);
+  function buyItem(id) {
+    const item = SHOP_ITEMS.find((i) => i.id === id);
+    if (!item) return false;
+    if (readCash(world) < item.price) {
+      toast(world, `Not enough cash for ${item.name} ($${item.price}).`);
       return false;
     }
-    world.cash -= price;
-    if (world.player) world.player.cash = world.cash;
+    const player = world.player || {};
+    if (id === 'health') {
+      if ((player.health || 100) >= 100) { toast(world, 'Health is already full.'); return false; }
+      player.health = clamp((player.health || 0) + 50, 0, 100);
+    } else if (id === 'ammo') {
+      player.ammo = (player.ammo || 0) + 30;
+    } else if (id === 'rifle-ammo') {
+      player.rifleAmmo = (player.rifleAmmo || 0) + 20;
+    } else if (id === 'nos') {
+      if ((player.nos || 0) >= 100) { toast(world, 'NOS tank is already full.'); return false; }
+      player.nos = 100;
+    } else if (id === 'armor') {
+      if ((player.armor || 0) >= 100) { toast(world, 'Armor is already full.'); return false; }
+      player.armor = clamp((player.armor || 0) + 50, 0, 100);
+    }
+    if (world.player) world.player = player;
+    addCash(world, -item.price);
+    toast(world, `Bought ${item.name} for $${item.price}.`);
+    if (Array.isArray(world.events)) world.events.push({ type: 'shop-buy', item: id, price: item.price });
     return true;
   }
 
-  function buyHealth() {
-    if (!pay(HEALTH_PRICE)) return;
-    if (world.player) world.player.health = 100;
-    jingle();
-    say('Patched up — full health.');
-  }
-
-  function buyAmmo() {
-    // v3 — rifle rounds cost more: the price follows the weapon Rico
-    // is holding (pistol / SMG / shotgun $100, rifle $150).
-    let price = AMMO_PRICE;
-    try {
-      const combat = world.systems && world.systems.combat;
-      const weapon = combat && combat.state ? combat.state.weapon : null;
-      if (weapon && AMMO_PRICES[weapon] !== undefined) price = AMMO_PRICES[weapon];
-    } catch {
-      price = AMMO_PRICE;
-    }
-    if (!pay(price)) return;
-    let refilled = false;
-    try {
-      const combat = world.systems && world.systems.combat;
-      if (combat && typeof combat.buyAmmo === 'function') {
-        combat.buyAmmo();
-        refilled = true;
-      }
-    } catch {
-      refilled = false;
-    }
-    // Fallback when combat has no buyAmmo yet: refill the player's count.
-    if (!refilled) {
-      if (world.player) world.player.ammo = AMMO_FULL;
-      try {
-        const combat = world.systems && world.systems.combat;
-        if (combat && combat.state) combat.state.ammo = AMMO_FULL;
-      } catch {
-        // Combat state is optional.
-      }
-    }
-    jingle();
-    say(`Ammo restocked — $${price}.`);
-  }
-
-  // v3 — NOS canister: refills the boost tank to full on the spot.
-  function buyNos() {
-    if (!pay(NOS_PRICE)) return;
-    if (world.player) world.player.nos = 1;
-    jingle();
-    say('NOS tank full — go burn it.');
-  }
-
-  // v3 — armour vest: 100 durability, soaks half of every hit until it
-  // breaks (combat.js spends it in hurtPlayer). Buying a fresh vest
-  // while one is worn replaces it.
-  function buyArmor() {
-    if (!pay(ARMOR_PRICE)) return;
-    if (world.player) world.player.armor = ARMOR_DURABILITY;
-    jingle();
-    say('Armour vest on — half of every hit, until it breaks.');
-  }
-
-  function saveGame() {
-    // Prefer the real save system; fall back to writing the same blob by hand.
-    try {
-      const saveSystem = world.systems && world.systems.save;
-      if (saveSystem && typeof saveSystem.save === 'function') return saveSystem.save(world);
-    } catch {
-      // Fall through to the direct write.
-    }
-    try {
-      if (world.save && typeof world.save.save === 'function') return world.save.save(world);
-    } catch {
-      // Fall through to the direct write.
-    }
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-          cash: Math.floor(world.cash || 0),
-          missionsDone: Array.isArray(world.missionsDone) ? [...world.missionsDone] : [],
-          playerPos: { x: world.player.pos.x, z: world.player.pos.z },
-          wanted: 0,
-        }));
-        return true;
-      }
-    } catch {
+  function useSafehouse() {
+    if (safehouseCooldown > 0) {
+      toast(world, `Safehouse is cooling down (${Math.ceil(safehouseCooldown)}s).`);
       return false;
     }
-    return false;
-  }
-
-  function useSafehouse() {
-    const now = world.time || 0;
-    const left = SAFEHOUSE_COOLDOWN - (now - state.lastSafehouseAt);
-    if (left > 0) {
-      say(`Safehouse cooling down — ${Math.ceil(left)}s left.`);
-      return;
+    if (readCash(world) < SAFEHOUSE_COST) {
+      toast(world, `Safehouse costs $${SAFEHOUSE_COST}.`);
+      return false;
     }
-    if (!pay(SAFEHOUSE_PRICE)) return;
-    state.lastSafehouseAt = now;
+    addCash(world, -SAFEHOUSE_COST);
+    safehouseCooldown = SAFEHOUSE_COOLDOWN;
     if (world.player) world.player.health = 100;
     world.wanted = 0;
-    try {
-      const police = world.systems && world.systems.police;
-      if (police && typeof police.clearWanted === 'function') police.clearWanted();
-    } catch {
-      // Wanted is already 0 above.
+    if (world.player) world.player.wanted = 0;
+    toast(world, 'Safehouse: saved, healed, wanted cleared.');
+    if (Array.isArray(world.events)) world.events.push({ type: 'safehouse-use' });
+    if (world.systems && world.systems.save && typeof world.systems.save.save === 'function') {
+      world.systems.save.save();
     }
-    const saved = saveGame();
-    jingle();
-    say(saved ? 'Safehouse — saved, healed, heat gone.' : 'Safehouse — healed, heat gone. (Save did not stick.)');
+    return true;
+  }
+
+  function buyBike(id) {
+    const bike = BIKES_FOR_SALE.find((b) => b.id === id);
+    if (!bike) return false;
+    if (world.ownedBikes.includes(id)) {
+      toast(world, `You already own the ${bike.name}.`);
+      return false;
+    }
+    if (readCash(world) < bike.price) {
+      toast(world, `${bike.name} costs $${bike.price.toLocaleString()}.`);
+      return false;
+    }
+    addCash(world, -bike.price);
+    world.ownedBikes.push(id);
+    toast(world, `You bought the ${bike.name} for $${bike.price.toLocaleString()}! Press 0 at the shop to call it.`);
+    if (Array.isArray(world.events)) {
+      world.events.push({ type: 'bike-bought', bike: id, price: bike.price });
+    }
+    return true;
+  }
+
+  function callBike(id) {
+    const kind = id || world.ownedBikes[world.ownedBikes.length - 1];
+    if (!kind) { toast(world, 'You own no bikes yet — visit the bike shop.'); return false; }
+    if (!world.ownedBikes.includes(kind)) {
+      toast(world, `You do not own a ${kind} yet.`);
+      return false;
+    }
+    const p = playerPos(world);
+    if (!p) return false;
+    if (Array.isArray(world.events)) {
+      world.events.push({ type: 'bike-call', bike: kind, x: p.x + 4, z: p.z + 4 });
+    }
+    toast(world, `Your ${kind} is on its way to you.`);
+    return true;
   }
 
   function update(dt) {
-    // Pulse the beacon discs so the two spots read from down the street.
-    try {
-      const t = world.time || 0;
-      const pulse = 0.55 + 0.3 * Math.sin((2 * Math.PI * t) / 1.5);
-      shopBeacon.mat.opacity = pulse;
-      safeBeacon.mat.opacity = pulse;
-    } catch {
-      // Cosmetic only.
+    safehouseCooldown = Math.max(0, safehouseCooldown - dt);
+    const p = playerPos(world);
+    if (!p) { snapshotKeys(world); return; }
+
+    nearShop = Math.hypot(SHOP_POS.x - p.x, SHOP_POS.z - p.z) < 10;
+    nearSafehouse = Math.hypot(SAFEHOUSE_POS.x - p.x, SAFEHOUSE_POS.z - p.z) < 10;
+    nearBikeShop = Math.hypot(BIKE_SHOP_POS.x - p.x, BIKE_SHOP_POS.z - p.z) < 10;
+
+    if (nearShop && !wasNearShop) {
+      toast(world, 'Corner Shop — 1 health $150, 2 ammo $100, 3 rifle ammo $150, 4 NOS $80, 5 armor $250.');
     }
-
-    const player = world.player;
-    const keys = world.input && world.input.keys;
-    if (!player || !player.pos || !keys) {
-      qWasDown = false;
-      rWasDown = false;
-      bWasDown = false;
-      vWasDown = false;
-      return;
+    if (nearSafehouse && !wasNearSafehouse) {
+      toast(world, `Safehouse — press H to save, heal and clear wanted ($${SAFEHOUSE_COST}).`);
     }
-
-    // On foot only: no shopping from the driver's seat.
-    if (!player.onFoot) {
-      setPrompt('');
-      qWasDown = keys.has('KeyQ');
-      rWasDown = keys.has('KeyR');
-      bWasDown = keys.has('KeyB');
-      vWasDown = keys.has('KeyV');
-      return;
+    if (nearBikeShop && !wasNearBikeShop) {
+      toast(world, 'Bike Shop — 7 scooter $800, 8 street bike $2,500, 9 superbike $6,000. 0 calls your bike.');
     }
+    wasNearShop = nearShop;
+    wasNearSafehouse = nearSafehouse;
+    wasNearBikeShop = nearBikeShop;
 
-    const nearShop = distXZ(player.pos, shopPos) <= SHOP_RANGE;
-    const nearSafe = distXZ(player.pos, safehousePos) <= SHOP_RANGE;
-    const qDown = keys.has('KeyQ');
-    const rDown = keys.has('KeyR');
-    const bDown = keys.has('KeyB');
-    const vDown = keys.has('KeyV');
-
+    // Edge-triggered buys: holding the key must not buy twice.
     if (nearShop) {
-      // v3 — the full shelf: health, ammo (priced by weapon), NOS, vest.
-      setPrompt('Q: Health $150 · R: Ammo $100 · B: NOS $80 · V: Vest $250');
-      if (qDown && !qWasDown) buyHealth();
-      if (rDown && !rWasDown) buyAmmo();
-      if (bDown && !bWasDown) buyNos();
-      if (vDown && !vWasDown) buyArmor();
-    } else if (nearSafe) {
-      const now = world.time || 0;
-      const left = SAFEHOUSE_COOLDOWN - (now - state.lastSafehouseAt);
-      setPrompt(left > 0
-        ? `Safehouse — cooling down (${Math.ceil(left)}s)`
-        : 'Q: Save + Heal $300');
-      if (qDown && !qWasDown) useSafehouse();
-    } else {
-      setPrompt('');
+      for (const item of SHOP_ITEMS) {
+        if (pressedNow(world, item.key)) buyItem(item.id);
+      }
     }
+    if (nearBikeShop) {
+      for (const bike of BIKES_FOR_SALE) {
+        if (pressedNow(world, bike.key)) buyBike(bike.id);
+      }
+      if (pressedNow(world, 'Digit0')) callBike();
+    }
+    if (nearSafehouse && pressedNow(world, 'KeyH')) useSafehouse();
 
-    qWasDown = qDown;
-    rWasDown = rDown;
-    bWasDown = bDown;
-    vWasDown = vDown;
+    snapshotKeys(world);
   }
 
-  return { update, state };
+  return {
+    update,
+    shopItems: SHOP_ITEMS,
+    bikesForSale: BIKES_FOR_SALE,
+    buyItem,
+    useSafehouse,
+    buyBike,
+    callBike,
+    isNearShop() { return nearShop; },
+    isNearSafehouse() { return nearSafehouse; },
+    isNearBikeShop() { return nearBikeShop; },
+    getSafehouseCooldown() { return safehouseCooldown; },
+    getOwnedBikes() { return [...world.ownedBikes]; },
+  };
 }

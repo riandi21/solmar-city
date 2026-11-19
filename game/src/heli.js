@@ -1,72 +1,48 @@
-// Police helicopter: shows up at 4+ wanted stars, spotlights the player.
-//   createHelicopter(scene, world) -> { update(dt), active, pos }
-// `pos` IS the heli group's THREE.Vector3, so staging code can move it
-// directly. The spotlight cone hangs straight down from the belly (the heli
-// always hovers right above the player) and a light disc marks the player
-// on the ground. When the heat drops below 4 stars the heli climbs away
-// and hides. Cheap on purpose: ~10 meshes in one Group + one ground disc.
-// v3: the police AI leads the hover point ahead of a fast player's
-// velocity (heliLead), and the heli drops to a lower hover at night so
-// the spotlight reads against the dark streets.
+// Helicopter — the police air unit for Solmar City.
+// Active at 4 wanted stars and above: follows the player from above,
+// leads the player's direction of travel, and keeps a spotlight cone
+// locked on them. Hides (parked out of sight) at 0 stars.
+// Communicates only through the shared world object.
 import * as THREE from 'three';
 
-const HOVER_HEIGHT = 50; // hover band 45-55 m; ease toward the middle
-const SPAWN_HEIGHT = 60; // height above the player when it first appears
-const FOLLOW_SPEED = 25; // m/s, horizontal chase speed
-const VERTICAL_SPEED = 12; // m/s, ease toward the hover band
-const CLIMB_AWAY_SPEED = 18; // m/s, leaving when the heat drops
-const DEPART_HEIGHT = 130; // hide once it has climbed this high
-const ROTOR_SPEED = 25; // rad/s, main rotor
-const TAIL_ROTOR_SPEED = 30; // rad/s, tail rotor
+const CRUISE_HEIGHT = 55;
+const HIDE_POSITION = new THREE.Vector3(0, -80, -700);
 
-export function createHelicopter(scene, world) {
+function buildHeliMesh() {
   const group = new THREE.Group();
-  group.visible = false;
+  const dark = new THREE.MeshStandardMaterial({ color: 0x14203a, roughness: 0.45, metalness: 0.55 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fd8e8, roughness: 0.15, metalness: 0.2 });
 
-  const darkMat = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.5, metalness: 0.3 });
-  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.5 });
-  const glassMat = new THREE.MeshStandardMaterial({ color: 0x0e2233, roughness: 0.2, metalness: 0.5 });
-  const rotorMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 });
-
-  // Body: dark shell + white stripe + glass nose.
-  const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.6, 4.2), darkMat);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.2, 2.4), dark);
   body.position.y = 0;
-  body.castShadow = true;
   group.add(body);
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.24, 0.4, 4.24), whiteMat);
-  stripe.position.y = 0.1;
-  group.add(stripe);
-  const glass = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.9, 1.2), glassMat);
-  glass.position.set(0, 0.25, 1.6);
-  group.add(glass);
-  // Tail boom + fin, stretching back (-Z).
-  const boom = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 5.5), darkMat);
-  boom.position.set(0, 0.3, -4.6);
-  boom.castShadow = true;
-  group.add(boom);
-  const fin = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.8, 1.4), darkMat);
-  fin.position.set(0, 1.0, -7.0);
-  group.add(fin);
-  // Main rotor on a short mast; spins fast around Y.
-  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.7, 8), rotorMat);
-  mast.position.y = 1.1;
-  group.add(mast);
-  const mainRotor = new THREE.Mesh(new THREE.BoxGeometry(14, 0.08, 0.6), rotorMat);
-  mainRotor.position.y = 1.5;
-  mainRotor.castShadow = true;
-  group.add(mainRotor);
-  // Tail rotor on the side of the fin; spins around X.
-  const tailRotor = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.4, 0.3), rotorMat);
-  tailRotor.position.set(0.25, 1.0, -7.0);
-  group.add(tailRotor);
-  // Landing skids.
-  for (const side of [-1, 1]) {
-    const skid = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 3.6), rotorMat);
-    skid.position.set(side * 0.95, -1.15, 0);
-    group.add(skid);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.6, 2.2), glass);
+  nose.position.set(2.6, -0.1, 0);
+  group.add(nose);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.9, 0.7), dark);
+  tail.position.set(-4.4, 0.5, 0);
+  group.add(tail);
+  const tailFin = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.2, 0.25), dark);
+  tailFin.position.set(-7, 1.2, 0);
+  group.add(tailFin);
+  const skidA = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.15, 0.25), dark);
+  skidA.position.set(0, -1.5, 1.1);
+  group.add(skidA);
+  const skidB = skidA.clone();
+  skidB.position.z = -1.1;
+  group.add(skidB);
+  const rotor = new THREE.Group();
+  const bladeMat = new THREE.MeshStandardMaterial({ color: 0x30343c, roughness: 0.4, metalness: 0.6 });
+  for (const angle of [0, Math.PI / 2]) {
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(11, 0.12, 0.5), bladeMat);
+    blade.rotation.y = angle;
+    rotor.add(blade);
   }
-  // Spotlight cone: unit height, stretched to the ground each frame so the
-  // apex stays at the belly and the wide end sits on the ground.
+  rotor.position.y = 1.5;
+  group.add(rotor);
+  group.userData.rotor = rotor;
+
+  // Spotlight cone (visual) — a translucent cone hanging under the heli.
   const coneMat = new THREE.MeshBasicMaterial({
     color: 0xfff2b0,
     transparent: true,
@@ -74,105 +50,107 @@ export function createHelicopter(scene, world) {
     side: THREE.DoubleSide,
     depthWrite: false,
   });
-  const cone = new THREE.Mesh(new THREE.ConeGeometry(7, 1, 20, 1, true), coneMat);
-  cone.position.y = -HOVER_HEIGHT / 2;
-  cone.scale.y = HOVER_HEIGHT;
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(9, CRUISE_HEIGHT, 20, 1, true), coneMat);
+  cone.position.y = -CRUISE_HEIGHT / 2;
+  cone.rotation.x = Math.PI;
   group.add(cone);
+  group.userData.cone = cone;
 
-  // Ground light disc: a scene-level mesh (not a child of the group) so it
-  // stays flat on the ground while the heli moves.
-  const discMat = new THREE.MeshBasicMaterial({
-    color: 0xffe9a0,
-    transparent: true,
-    opacity: 0.28,
-    depthWrite: false,
-  });
-  const groundDisc = new THREE.Mesh(new THREE.CircleGeometry(7, 24), discMat);
-  groundDisc.rotation.x = -Math.PI / 2;
-  groundDisc.position.y = 0.15;
-  groundDisc.visible = false;
-  scene.add(groundDisc);
+  // Real spotlight so the ground under the player lights up at night.
+  const spot = new THREE.SpotLight(0xfff2b0, 3.2, 130, 0.32, 0.45, 1.1);
+  spot.position.set(0, -1, 0);
+  group.add(spot);
+  group.userData.spot = spot;
 
-  scene.add(group);
+  return group;
+}
 
-  const heli = { update, active: false, pos: group.position };
+export function createHeli(world) {
+  world.systems = world.systems || {};
+  world.player = world.player || {};
 
-  function update(dt) {
-    const capped = Math.min(dt || 0, 0.05);
-    try {
-      const pp = world && world.player && world.player.pos;
-      const wanted = (world && world.wanted) || 0;
-      // v3 — heli coordination: the police AI leads the target by his
-      // velocity, so the heli hovers ahead of a fast car instead of
-      // lagging over the rear bumper. At night it also drops lower
-      // (35 m) so its spotlight reads against the dark streets.
-      let leadX = pp ? pp.x : 0;
-      let leadZ = pp ? pp.z : 0;
-      let nightHover = false;
-      try {
-        const ai = world.systems && world.systems.policeai;
-        if (ai && typeof ai.heliLead === 'function') {
-          const lead = ai.heliLead();
-          if (lead && typeof lead.x === 'number') {
-            leadX = lead.x;
-            leadZ = lead.z;
-          }
-        }
-        const dn = world.systems && world.systems.daynight;
-        if (dn && typeof dn.isNight === 'function' && dn.isNight()) nightHover = true;
-      } catch {
-        // Lead and night hover are niceties; the plain hover still works.
-      }
-      const hoverHeight = nightHover ? 35 : HOVER_HEIGHT;
-      if (wanted >= 4 && pp) {
-        if (!heli.active) {
-          // Spawn ~60 m above the player.
-          group.position.set(pp.x, (pp.y || 0) + SPAWN_HEIGHT, pp.z);
-          group.visible = true;
-          heli.active = true;
-        }
-        // Follow the lead point at ~25 m/s horizontally.
-        const dx = leadX - group.position.x;
-        const dz = leadZ - group.position.z;
-        const d = Math.hypot(dx, dz);
-        if (d > 0.01) {
-          const step = Math.min(d, FOLLOW_SPEED * capped);
-          group.position.x += (dx / d) * step;
-          group.position.z += (dz / d) * step;
-          // Nose follows the direction of travel.
-          group.rotation.y = Math.atan2(dx, dz);
-        }
-        // Ease into the hover band (lower at night).
-        const dy = hoverHeight - group.position.y;
-        group.position.y += Math.max(-VERTICAL_SPEED * capped, Math.min(VERTICAL_SPEED * capped, dy));
-      } else if (heli.active) {
-        // Heat dropped: climb away, then hide.
-        group.position.y += CLIMB_AWAY_SPEED * capped;
-        if (group.position.y >= DEPART_HEIGHT) {
-          group.visible = false;
-          heli.active = false;
-        }
-      }
-      if (group.visible) {
-        mainRotor.rotation.y += ROTOR_SPEED * capped;
-        tailRotor.rotation.x += TAIL_ROTOR_SPEED * capped;
-      }
-      // Spotlight cone + ground disc always track the player.
-      if (group.visible && pp) {
-        const alt = Math.max(1, group.position.y - (pp.y || 0));
-        cone.scale.y = alt;
-        cone.position.y = -alt / 2;
-        cone.visible = true;
-        groundDisc.visible = true;
-        groundDisc.position.set(pp.x, 0.15, pp.z);
-      } else {
-        cone.visible = false;
-        groundDisc.visible = false;
-      }
-    } catch (err) {
-      // Never let a bad world read kill the frame loop.
-    }
+  const mesh = buildHeliMesh();
+  mesh.position.copy(HIDE_POSITION);
+  mesh.visible = false;
+  if (world.scene) world.scene.add(mesh);
+
+  const state = {
+    active: false,
+    spotlightOn: false,
+    // Smooth chase state so the heli eases in and out instead of popping.
+    hover: mesh.position.clone(),
+  };
+
+  function playerPos() {
+    return world.player.position || new THREE.Vector3(0, 0, 0);
   }
 
-  return heli;
+  function leadTarget() {
+    const policeai = world.systems.policeai;
+    if (policeai && typeof policeai.heliLeadTarget === 'function') {
+      return policeai.heliLeadTarget(1.6);
+    }
+    const pos = playerPos();
+    const speed = world.player.speed || 0;
+    const heading = world.player.heading || 0;
+    return new THREE.Vector3(
+      pos.x + Math.sin(heading) * speed * 1.6,
+      0,
+      pos.z + Math.cos(heading) * speed * 1.6
+    );
+  }
+
+  function update(dt) {
+    const wanted = world.wanted || 0;
+    const shouldBeActive = wanted >= 4;
+    state.active = shouldBeActive;
+    state.spotlightOn = shouldBeActive;
+
+    const rotor = mesh.userData.rotor;
+    if (rotor) rotor.rotation.y += dt * (shouldBeActive ? 22 : 4);
+
+    if (!shouldBeActive) {
+      // Sink back to the hidden parking spot and switch off.
+      mesh.visible = mesh.position.y > -60;
+      mesh.position.lerp(HIDE_POSITION, Math.min(1, dt * 1.5));
+      mesh.userData.cone.visible = false;
+      mesh.userData.spot.visible = false;
+      state.hover.copy(mesh.position);
+      return;
+    }
+
+    mesh.visible = true;
+    const target = leadTarget();
+    // On foot the heli drops lower and tightens its cone — a runner is
+    // easier to pin down than a speeding car.
+    const altitude = world.player.onFoot ? 38 : CRUISE_HEIGHT;
+    const desired = new THREE.Vector3(target.x - 6, altitude, target.z - 6);
+    state.hover.lerp(desired, Math.min(1, dt * 1.2));
+    mesh.position.copy(state.hover);
+    // Face the player's direction of travel.
+    const heading = world.player.heading || 0;
+    mesh.rotation.y = -heading + Math.PI / 2;
+
+    // Spotlight cone tracks the player on the ground.
+    const pos = playerPos();
+    mesh.userData.cone.visible = true;
+    mesh.userData.spot.visible = true;
+    const spot = mesh.userData.spot;
+    spot.target.position.set(pos.x - mesh.position.x, -CRUISE_HEIGHT, pos.z - mesh.position.z);
+    // The spot target must be in the scene graph to take effect.
+    if (!spot.target.parent) mesh.add(spot.target);
+    const cone = mesh.userData.cone;
+    cone.lookAt(new THREE.Vector3(pos.x, 0, pos.z));
+    cone.rotateX(Math.PI / 2);
+  }
+
+  const api = {
+    update,
+    get mesh() { return mesh; },
+    get active() { return state.active; },
+    get spotlightOn() { return state.spotlightOn; },
+    get position() { return mesh.position; },
+  };
+  world.systems.heli = api;
+  return api;
 }

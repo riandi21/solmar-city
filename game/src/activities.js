@@ -1,512 +1,310 @@
-// Side activities for Solmar City — street races, hidden packages,
-// and taxi jobs. Free-roam money for Rico between story missions.
-//
-//   * Street races (T) — three courses with checkpoint rings and cash
-//     prizes. Stand on a start gantry and press T; the clock runs and
-//     the rings light up in order. Beat your best time and the HUD
-//     tracker remembers it.
-//   * Hidden packages — 20 gold parcels stashed around the city (Old
-//     Town, the lighthouse, the pier, the freight yard…). Walk over one
-//     to pocket $50. The HUD tracker counts them.
-//   * Taxi jobs — a fare waves you down at the roadside; pull up in a
-//     car, drive them to the gold marker, and get paid by the distance.
-//
-//   createActivities(scene, world) -> { update, state, startRace,
-//     raceStatus, packagesFound, taxiEarned }
-// Progress lives on world.activitiesProgress so save.js can persist it
-// without importing this module.
 import * as THREE from 'three';
-import { dist2XZ } from './world.js';
 
-export const RACES = [
+// Street races, hidden packages and taxi jobs for Solmar City.
+// A race is a chain of checkpoint rings: drive through them in order
+// before the timer runs out and the prize lands in Rico's cash.
+const RACE_DEFS = [
   {
-    id: 'boardwalk',
-    name: 'Boardwalk Sprint',
-    prize: 300,
-    par: 60,
-    start: { x: 0, z: 232 },
-    checkpoints: [
-      { x: 0, z: 232 },
-      { x: 116, z: 232 },
-      { x: 232, z: 232 },
-      { x: 232, z: 116 },
-    ],
-  },
-  {
-    id: 'oldtown',
-    name: 'Old Town Loop',
+    id: 'strip-sprint',
+    name: 'Strip Sprint',
     prize: 600,
-    par: 75,
-    start: { x: -174, z: -58 },
-    checkpoints: [
-      { x: -174, z: -58 },
-      { x: -174, z: 116 },
-      { x: 0, z: 116 },
-      { x: 0, z: -58 },
-      { x: -174, z: -58 },
+    limit: 75,
+    points: [
+      { x: 58, z: 0 }, { x: 116, z: 0 }, { x: 174, z: 0 },
+      { x: 174, z: 58 }, { x: 116, z: 58 }, { x: 58, z: 58 },
+      { x: 0, z: 58 }, { x: 0, z: 0 },
     ],
   },
   {
-    id: 'harbor',
-    name: 'Harbor Grand Prix',
-    prize: 1200,
-    par: 150,
-    start: { x: -170, z: -232 },
-    checkpoints: [
-      { x: -170, z: -232 },
-      { x: 232, z: -232 },
-      { x: 232, z: 232 },
-      { x: -232, z: 232 },
-      { x: -170, z: -232 },
-    ],
-  },
-  {
-    id: 'lighthouse',
-    name: 'Lighthouse Dash',
+    id: 'marina-loop',
+    name: 'Marina Loop',
     prize: 900,
-    par: 90,
-    start: { x: -232, z: 232 },
-    checkpoints: [
-      { x: -232, z: 232 },
-      { x: -232, z: 0 },
-      { x: -232, z: -232 },
-      { x: 0, z: -232 },
-      { x: 232, z: -232 },
+    limit: 95,
+    points: [
+      { x: 232, z: 116 }, { x: 232, z: 174 }, { x: 261, z: 232 },
+      { x: 295, z: 168 }, { x: 232, z: 232 }, { x: 174, z: 232 },
+      { x: 174, z: 174 }, { x: 232, z: 116 },
+    ],
+  },
+  {
+    id: 'old-town-dash',
+    name: 'Old Town Dash',
+    prize: 750,
+    limit: 85,
+    points: [
+      { x: -174, z: -58 }, { x: -232, z: -58 }, { x: -232, z: -116 },
+      { x: -174, z: -116 }, { x: -116, z: -116 }, { x: -116, z: -58 },
+      { x: -174, z: -29 }, { x: -203, z: -87 },
+    ],
+  },
+  {
+    id: 'docks-gauntlet',
+    name: 'Docks Gauntlet',
+    prize: 1200,
+    limit: 110,
+    points: [
+      { x: -232, z: -232 }, { x: -203, z: -232 }, { x: -203, z: -203 },
+      { x: -232, z: -203 }, { x: -232, z: -174 }, { x: -203, z: -174 },
+      { x: -174, z: -203 }, { x: -174, z: -232 }, { x: -232, z: -261 },
+      { x: -174, z: -261 },
     ],
   },
 ];
 
-// Twenty stash spots, spread so every district hides at least one.
-export const PACKAGE_SPOTS = [
-  { x: -203, z: -58 }, // Old Town plaza, by the fountain
-  { x: -224, z: -104 }, // Old Town, north-west lane
-  { x: -182, z: -12 }, // Old Town, south-east lane
-  { x: -270, z: 300 }, // lighthouse base
-  { x: -232, z: 290 }, // south-west beach
-  { x: 0, z: 318 }, // pier end
-  { x: 0, z: 264 }, // boardwalk centre
-  { x: 116, z: 264 }, // boardwalk east
-  { x: -116, z: 264 }, // boardwalk west
-  { x: -170, z: -260 }, // freight yard gate
-  { x: -203, z: -232 }, // freight yard, north fence
-  { x: 232, z: 160 }, // marina entrance
-  { x: 255, z: 100 }, // marina, north pier
-  { x: -174, z: 232 }, // safehouse
-  { x: 58, z: 116 }, // shop
-  { x: 58, z: 29 }, // Coral Club door
-  { x: -58, z: -174 }, // north residential
-  { x: 174, z: -116 }, // east residential
-  { x: 0, z: 0 }, // downtown crossing
-  { x: 116, z: 58 }, // midtown east
+// Twenty stashes tucked around the city. Each one is worth fifty dollars.
+const PACKAGE_SPOTS = [
+  { x: 58, z: 29 }, { x: -58, z: 116 }, { x: 116, z: -58 },
+  { x: -116, z: -174 }, { x: 232, z: 0 }, { x: -232, z: 58 },
+  { x: 0, z: 232 }, { x: 174, z: 174 }, { x: -174, z: 232 },
+  { x: 29, z: -203 }, { x: -203, z: -29 }, { x: 116, z: 232 },
+  { x: -58, z: -232 }, { x: 295, z: 168 }, { x: -270, z: 300 },
+  { x: 0, z: 318 }, { x: 100, z: 60 }, { x: -150, z: 200 },
+  { x: 200, z: -200 }, { x: -232, z: -232 },
 ];
 
-const PACKAGE_REWARD = 50;
-const TAXI_MIN_FARE = 150;
-const TAXI_PER_METRE = 0.6;
-const TAXI_RESPAWN_SECONDS = 20;
-const RACE_START_RADIUS = 8;
-const RACE_RING_RADIUS = 9;
+const DISTRICT_CENTERS = [
+  { name: 'Downtown', x: 0, z: 0 },
+  { name: 'Old Town', x: -203, z: -58 },
+  { name: 'Marina', x: 300, z: 160 },
+  { name: 'Boardwalk', x: 0, z: 285 },
+  { name: 'Freight Yard', x: -185, z: -225 },
+  { name: 'Airfield', x: 200, z: -200 },
+];
 
-function makeCheckeredGantry(color) {
-  // A start gantry: two posts + a checkered beam across the road.
-  const group = new THREE.Group();
-  const postMat = new THREE.MeshStandardMaterial({ color: 0x2c313a, roughness: 0.6 });
-  for (const sx of [-5, 5]) {
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 5.5, 8), postMat);
-    post.position.set(sx, 2.75, 0);
-    post.castShadow = true;
-    group.add(post);
+function districtAt(x, z) {
+  let best = DISTRICT_CENTERS[0];
+  let bestD = Infinity;
+  for (const d of DISTRICT_CENTERS) {
+    const dd = (d.x - x) * (d.x - x) + (d.z - z) * (d.z - z);
+    if (dd < bestD) { bestD = dd; best = d; }
   }
-  const beam = new THREE.Group();
-  for (let i = 0; i < 10; i += 1) {
-    const tile = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 0.15),
-      new THREE.MeshStandardMaterial({ color: i % 2 === 0 ? 0x111111 : 0xf2f2f2, roughness: 0.5 }),
-    );
-    tile.position.set(-4.5 + i, 0, 0);
-    beam.add(tile);
-  }
-  beam.position.y = 5.2;
-  group.add(beam);
-  const banner = new THREE.Mesh(
-    new THREE.BoxGeometry(10, 0.9, 0.1),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.5, emissive: color, emissiveIntensity: 0.25 }),
-  );
-  banner.position.y = 4.4;
-  group.add(banner);
-  return group;
+  return best.name;
+}
+
+function readCash(world) {
+  if (world.player && typeof world.player.cash === 'number') return world.player.cash;
+  return typeof world.cash === 'number' ? world.cash : 0;
+}
+
+function addCash(world, amount) {
+  const next = readCash(world) + amount;
+  if (world.player) world.player.cash = next;
+  world.cash = next;
+  return next;
+}
+
+function playerPos(world) {
+  const p = world.player && world.player.position;
+  if (!p) return null;
+  return { x: p.x, y: p.y || 0, z: p.z };
+}
+
+function toast(world, text) {
+  if (typeof world.toast === 'function') world.toast(text);
+}
+
+function pushEvent(world, event) {
+  if (Array.isArray(world.events)) world.events.push(event);
 }
 
 function makeRing(color) {
-  const group = new THREE.Group();
-  const ringMat = new THREE.MeshBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.9,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(RACE_RING_RADIUS, 0.4, 8, 28), ringMat);
-  ring.rotation.x = Math.PI / 2;
-  ring.position.y = 1.4;
-  group.add(ring);
-  const disc = new THREE.Mesh(
-    new THREE.CircleGeometry(RACE_RING_RADIUS, 24),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false }),
+  const mesh = new THREE.Mesh(
+    new THREE.TorusGeometry(4, 0.35, 8, 24),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 }),
   );
-  disc.rotation.x = -Math.PI / 2;
-  disc.position.y = 0.15;
-  group.add(disc);
-  group.visible = false;
-  return { group, ringMat };
+  mesh.rotation.y = Math.PI / 2;
+  mesh.visible = false;
+  return mesh;
 }
 
-function makePackageMesh() {
-  // A gold parcel: a small wrapped box with a ribbon cross, bobbing and
-  // spinning so it catches the eye from down the street.
-  const group = new THREE.Group();
-  const gold = new THREE.MeshStandardMaterial({ color: 0xffd34d, roughness: 0.3, metalness: 0.5, emissive: 0x664400, emissiveIntensity: 0.5 });
-  const box = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.7, 0.9), gold);
-  box.position.y = 0.7;
-  box.castShadow = true;
-  group.add(box);
-  const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xc23a2e, roughness: 0.5 });
-  const ribbonA = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.72, 0.2), ribbonMat);
-  ribbonA.position.y = 0.7;
-  group.add(ribbonA);
-  const ribbonB = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.72, 0.95), ribbonMat);
-  ribbonB.position.y = 0.7;
-  group.add(ribbonB);
-  return group;
-}
+export function createActivities(world) {
+  const races = RACE_DEFS.map((def) => ({ ...def, best: null }));
+  const packages = PACKAGE_SPOTS.map((spot, i) => ({
+    id: i, x: spot.x, z: spot.z, taken: false, mesh: null,
+  }));
+  const rings = [];
+  let activeRace = null;
+  let raceClock = 0;
+  let ringIndex = 0;
+  let taxi = { state: 'idle', px: 0, pz: 0, dx: 0, dz: 0, fare: 0 };
+  let packageMeshes = [];
 
-function makePassengerMesh() {
-  // A waiting fare: a plain figure with a raised arm, ringed in gold.
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.7, 1.0, 0.4),
-    new THREE.MeshStandardMaterial({ color: 0x3a86ff, roughness: 0.8 }),
-  );
-  body.position.y = 1.0;
-  group.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.28, 10, 8),
-    new THREE.MeshStandardMaterial({ color: 0xe8b88a, roughness: 0.8 }),
-  );
-  head.position.y = 1.75;
-  group.add(head);
-  const arm = new THREE.Mesh(
-    new THREE.BoxGeometry(0.18, 0.9, 0.18),
-    new THREE.MeshStandardMaterial({ color: 0x3a86ff, roughness: 0.8 }),
-  );
-  arm.position.set(0.45, 1.6, 0);
-  arm.rotation.z = -0.9;
-  group.add(arm);
-  const ring = new THREE.Mesh(
-    new THREE.TorusGeometry(2.2, 0.15, 8, 24),
-    new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.8 }),
-  );
-  ring.rotation.x = Math.PI / 2;
-  ring.position.y = 0.2;
-  group.add(ring);
-  return group;
-}
-
-export function createActivities(scene, world) {
-  const progress = {
-    packagesFound: [], // indices into PACKAGE_SPOTS
-    raceBest: {}, // race id -> seconds
-    taxiEarned: 0,
-    raceWins: 0,
-    // v3 — the last three finished races, newest first, for the HUD
-    // tracker: { race, seconds, won }.
-    raceHistory: [],
-  };
-  world.activitiesProgress = progress;
-
-  const state = {
-    race: null, // { def, index, timer, rings }
-    racePrompt: '',
-    taxi: { phase: 'idle', passenger: null, mesh: null, dest: null, fare: 0, respawnIn: 5 },
-    packages: [], // { spot, mesh, found }
-  };
-
-  // --- race gantries (permanent, at each start line) -----------------------
-  for (const race of RACES) {
-    const gantry = makeCheckeredGantry(0xffd34d);
-    gantry.position.set(race.start.x, 0, race.start.z);
-    gantry.rotation.y = Math.PI / 2;
-    scene.add(gantry);
-  }
-
-  // --- hidden packages ------------------------------------------------------
-  for (let i = 0; i < PACKAGE_SPOTS.length; i += 1) {
-    const spot = PACKAGE_SPOTS[i];
-    const mesh = makePackageMesh();
-    mesh.position.set(spot.x, 0, spot.z);
-    scene.add(mesh);
-    state.packages.push({ spot, mesh, found: false, phase: Math.random() * Math.PI * 2 });
-  }
-
-  function announce(text) {
-    try {
-      if (world.hud) world.hud.showMessage(text);
-    } catch {
-      // Toast is cosmetic.
-    }
-  }
-
-  function pay(amount) {
-    world.cash = (world.cash || 0) + amount;
-    if (world.player) world.player.cash = world.cash;
-  }
-
-  // --- races ---------------------------------------------------------------
-  function nearestRaceStart(maxDist) {
-    const pp = world.player ? world.player.pos : { x: 0, z: 0 };
-    let best = null;
-    let bestD = maxDist;
-    for (const race of RACES) {
-      const d = dist2XZ(pp.x, pp.z, race.start.x, race.start.z);
-      if (d < bestD) {
-        bestD = d;
-        best = race;
-      }
-    }
-    return best;
-  }
-
-  function startRace(def) {
-    if (state.race) return false;
-    const rings = [];
-    for (const spot of def.checkpoints) {
-      const ring = makeRing(0x4dc3ff);
-      ring.group.position.set(spot.x, 0, spot.z);
-      scene.add(ring.group);
+  if (world.scene) {
+    for (let i = 0; i < 10; i++) {
+      const ring = makeRing(0xffc233);
+      world.scene.add(ring);
       rings.push(ring);
     }
-    rings[0].group.visible = true;
-    state.race = { def, index: 0, timer: 0, rings };
-    announce(`${def.name} — GO! ${def.checkpoints.length - 1} checkpoints, $${def.prize} to win.`);
+    packageMeshes = packages.map((pkg) => {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 0.9, 0.9),
+        new THREE.MeshBasicMaterial({ color: 0x33ff88 }),
+      );
+      mesh.position.set(pkg.x, 1.2, pkg.z);
+      world.scene.add(mesh);
+      pkg.mesh = mesh;
+      return mesh;
+    });
+  }
+
+  function showRing(i, point) {
+    rings.forEach((ring, n) => { ring.visible = n === i; });
+    if (point && rings[i]) rings[i].position.set(point.x, 2.2, point.z);
+  }
+
+  function hideRings() {
+    rings.forEach((ring) => { ring.visible = false; });
+  }
+
+  function startRace(index) {
+    if (activeRace) return false;
+    const race = races[index];
+    if (!race) return false;
+    const p = playerPos(world);
+    if (p) {
+      const start = race.points[0];
+      if (Math.hypot(start.x - p.x, start.z - p.z) > 25) {
+        toast(world, `${race.name}: drive to the start ring first (within 25 m).`);
+        return false;
+      }
+    }
+    activeRace = race;
+    ringIndex = 0;
+    raceClock = race.limit;
+    showRing(0, race.points[0]);
+    toast(world, `Race started: ${race.name} — ${race.points.length} checkpoints, ${race.limit}s!`);
+    pushEvent(world, { type: 'race-start', race: race.id });
     return true;
   }
 
   function finishRace() {
-    const race = state.race;
-    if (!race) return;
-    const t = race.timer;
-    const best = progress.raceBest[race.def.id];
-    const isBest = best === undefined || t < best;
-    if (isBest) progress.raceBest[race.def.id] = t;
-    pay(race.def.prize);
-    progress.raceWins += 1;
-    // v3 — keep the last three results (newest first) for the HUD tracker.
-    progress.raceHistory.unshift({ race: race.def.id, seconds: t, won: true });
-    if (progress.raceHistory.length > 3) progress.raceHistory.length = 3;
-    announce(
-      `${race.def.name} finished in ${t.toFixed(1)}s — $${race.def.prize} won!` +
-      (isBest ? ' New best time!' : ` Best: ${best.toFixed(1)}s.`),
-    );
-    for (const ring of race.rings) {
-      try {
-        scene.remove(ring.group);
-      } catch {
-        // Already gone.
-      }
-    }
-    state.race = null;
+    const race = activeRace;
+    const used = race.limit - raceClock;
+    if (race.best === null || used < race.best) race.best = used;
+    addCash(world, race.prize);
+    toast(world, `${race.name} complete in ${used.toFixed(1)}s! Prize $${race.prize}.`);
+    pushEvent(world, {
+      type: 'activity-complete', kind: 'race', race: race.id,
+      district: districtAt(race.points[0].x, race.points[0].z), amount: 6,
+    });
+    activeRace = null;
+    hideRings();
   }
 
   function failRace(reason) {
-    const race = state.race;
-    if (!race) return;
-    for (const ring of race.rings) {
-      try {
-        scene.remove(ring.group);
-      } catch {
-        // Already gone.
-      }
-    }
-    state.race = null;
-    announce(`Race over — ${reason}`);
+    toast(world, `Race failed: ${reason}.`);
+    pushEvent(world, { type: 'race-fail', race: activeRace.id, reason });
+    activeRace = null;
+    hideRings();
   }
 
-  function updateRace(dt) {
-    const race = state.race;
-    if (!race) return;
-    race.timer += dt;
-    if (race.timer > race.def.par * 2) {
-      failRace('too slow — the streets moved on');
-      return;
-    }
-    const spot = race.def.checkpoints[race.index];
-    if (!spot) {
-      finishRace();
-      return;
-    }
-    const pp = world.player ? world.player.pos : { x: 0, z: 0 };
-    if (dist2XZ(pp.x, pp.z, spot.x, spot.z) <= RACE_RING_RADIUS + 2) {
-      race.rings[race.index].group.visible = false;
-      race.index += 1;
-      if (race.index >= race.def.checkpoints.length) {
-        finishRace();
-        return;
-      }
-      race.rings[race.index].group.visible = true;
-    }
-    const live = race.rings[race.index];
-    if (live) live.ringMat.opacity = 0.55 + 0.35 * Math.sin((world.time || 0) * 6);
+  function startTaxi() {
+    if (taxi.state !== 'idle') return false;
+    const p = playerPos(world);
+    if (!p) return false;
+    // A passenger waits on a nearby road; the fare grows with the trip.
+    const spots = [
+      { x: 58, z: 116 }, { x: -58, z: 0 }, { x: 116, z: 174 },
+      { x: -174, z: 58 }, { x: 0, z: -116 }, { x: 232, z: -58 },
+    ];
+    const pick = spots[Math.floor(Math.random() * spots.length)];
+    const drops = [
+      { x: 295, z: 168 }, { x: 0, z: 318 }, { x: -270, z: 300 },
+      { x: 200, z: -200 }, { x: 29, z: 29 }, { x: -203, z: -87 },
+    ];
+    const drop = drops[Math.floor(Math.random() * drops.length)];
+    const dist = Math.hypot(drop.x - pick.x, drop.z - pick.z);
+    taxi = { state: 'pickup', px: pick.x, pz: pick.z, dx: drop.x, dz: drop.z, fare: 40 + Math.round(dist * 0.6) };
+    toast(world, 'Taxi job: pick up the passenger at the marker.');
+    pushEvent(world, { type: 'taxi-start', fare: taxi.fare });
+    return true;
   }
 
-  function raceStatus() {
-    if (!state.race) return 'idle';
-    return `racing:${state.race.def.id}:${state.race.index}/${state.race.def.checkpoints.length}`;
+  function taxiBonus() {
+    const owned = world.properties && world.properties.owned;
+    const hasDepot = Array.isArray(owned)
+      ? owned.includes('depot') || owned.includes('Coral Taxi Depot')
+      : owned && owned.depot;
+    return hasDepot ? 1.25 : 1;
   }
-
-  // --- packages ---------------------------------------------------------------
-  function updatePackages(dt) {
-    const pp = world.player ? world.player.pos : { x: 0, z: 0 };
-    for (let i = 0; i < state.packages.length; i += 1) {
-      const pkg = state.packages[i];
-      if (pkg.found) continue;
-      pkg.phase += dt;
-      pkg.mesh.position.y = Math.sin(pkg.phase * 2) * 0.15;
-      pkg.mesh.rotation.y += dt * 1.5;
-      if (dist2XZ(pp.x, pp.z, pkg.spot.x, pkg.spot.z) <= 3) {
-        pkg.found = true;
-        progress.packagesFound.push(i);
-        pay(PACKAGE_REWARD);
-        try {
-          scene.remove(pkg.mesh);
-        } catch {
-          // Already gone.
-        }
-        announce(
-          `Hidden package found! +$${PACKAGE_REWARD} — ` +
-          `${progress.packagesFound.length}/${PACKAGE_SPOTS.length} collected.`,
-        );
-        try {
-          if (world.audio && typeof world.audio.collect === 'function') world.audio.collect();
-        } catch {
-          // Sound is optional.
-        }
-      }
-    }
-  }
-
-  // --- taxi jobs --------------------------------------------------------------
-  function randomRoadsideSpot() {
-    // A roadside point 60-110 m from the player, snapped to the nearest road.
-    const pp = world.player ? world.player.pos : { x: 0, z: 0 };
-    const angle = Math.random() * Math.PI * 2;
-    const d = 60 + Math.random() * 50;
-    let x = pp.x + Math.sin(angle) * d;
-    let z = pp.z + Math.cos(angle) * d;
-    x = Math.max(-240, Math.min(240, x));
-    z = Math.max(-240, Math.min(240, z));
-    try {
-      if (world.city && typeof world.city.nearestRoad === 'function') {
-        const snap = world.city.nearestRoad(x, z);
-        return { x: snap.x, z: snap.z };
-      }
-    } catch {
-      // Fall through with the raw point.
-    }
-    return { x, z };
-  }
-
-  function spawnPassenger() {
-    const spot = randomRoadsideSpot();
-    const mesh = makePassengerMesh();
-    mesh.position.set(spot.x, 0, spot.z);
-    scene.add(mesh);
-    state.taxi = { phase: 'waiting', passenger: spot, mesh, dest: null, fare: 0, respawnIn: 0 };
-  }
-
-  function updateTaxi(dt) {
-    const taxi = state.taxi;
-    const player = world.player || {};
-    const pp = player.pos || { x: 0, z: 0 };
-    if (taxi.phase === 'idle') {
-      taxi.respawnIn -= dt;
-      if (taxi.respawnIn <= 0 && player.car) spawnPassenger();
-      return;
-    }
-    if (taxi.phase === 'waiting') {
-      // Pull up in a car within 6 m and the fare hops in.
-      if (player.car && !player.onFoot && dist2XZ(pp.x, pp.z, taxi.passenger.x, taxi.passenger.z) <= 6) {
-        const dest = randomRoadsideSpot();
-        const d = dist2XZ(taxi.passenger.x, taxi.passenger.z, dest.x, dest.z);
-        taxi.dest = dest;
-        taxi.fare = Math.round(TAXI_MIN_FARE + d * TAXI_PER_METRE);
-        taxi.phase = 'riding';
-        try {
-          scene.remove(taxi.mesh);
-        } catch {
-          // Already gone.
-        }
-        taxi.mesh = null;
-        if (world.mission) {
-          world.mission.marker = null; // taxi dest rides the mission marker slot briefly
-        }
-        announce(`Fare aboard — drop them off for $${taxi.fare}. Follow the gold marker.`);
-        // Reuse the mission beacon for the taxi destination.
-        try {
-          if (world.systems && world.systems.missions && world.mission) {
-            world.mission.marker = new THREE.Vector3(dest.x, 0, dest.z);
-          }
-        } catch {
-          // Marker is a nicety.
-        }
-      }
-      return;
-    }
-    if (taxi.phase === 'riding') {
-      if (dist2XZ(pp.x, pp.z, taxi.dest.x, taxi.dest.z) <= 10) {
-        pay(taxi.fare);
-        progress.taxiEarned += taxi.fare;
-        announce(`Fare complete — $${taxi.fare} earned. Total taxi money: $${progress.taxiEarned}.`);
-        state.taxi = { phase: 'idle', passenger: null, mesh: null, dest: null, fare: 0, respawnIn: TAXI_RESPAWN_SECONDS };
-      } else if (!player.car) {
-        // Rico walked away mid-fare: the passenger bails, no pay.
-        announce('The fare walked off — no tip for a driver on foot.');
-        state.taxi = { phase: 'idle', passenger: null, mesh: null, dest: null, fare: 0, respawnIn: TAXI_RESPAWN_SECONDS };
-      }
-    }
-  }
-
-  let prevT = false;
 
   function update(dt) {
-    if (world.mode !== 'play') return;
-    const capped = Math.min(dt || 0, 0.1);
-    // T starts the nearest race when Rico stands on its gantry.
-    const keys = (world.input && world.input.keys) || null;
-    const tDown = keys ? keys.has('KeyT') : false;
-    if (tDown && !prevT && !state.race) {
-      const race = nearestRaceStart(RACE_START_RADIUS);
-      if (race) startRace(race);
+    const p = playerPos(world);
+    if (!p) return;
+
+    // Hidden packages: walk or drive within a few metres to grab one.
+    for (const pkg of packages) {
+      if (pkg.taken) continue;
+      const d = Math.hypot(pkg.x - p.x, pkg.z - p.z);
+      if (d < 3.5) {
+        pkg.taken = true;
+        if (pkg.mesh) pkg.mesh.visible = false;
+        addCash(world, 50);
+        const found = packages.filter((q) => q.taken).length;
+        toast(world, `Hidden package found! +$50 (${found}/20).`);
+        pushEvent(world, {
+          type: 'activity-complete', kind: 'package', district: districtAt(pkg.x, pkg.z), amount: 2,
+        });
+      }
     }
-    prevT = tDown;
-    // Prompt when a race is available and none is running.
-    if (!state.race) {
-      const race = nearestRaceStart(RACE_START_RADIUS);
-      state.racePrompt = race ? `Press T — ${race.name} ($${race.prize})` : '';
-    } else {
-      state.racePrompt = '';
+
+    // Street race: timer ticks down, rings advance as Rico passes them.
+    if (activeRace) {
+      raceClock -= dt;
+      if (raceClock <= 0) { failRace('time ran out'); return; }
+      const point = activeRace.points[ringIndex];
+      const d = Math.hypot(point.x - p.x, point.z - p.z);
+      if (d < 6) {
+        ringIndex += 1;
+        if (ringIndex >= activeRace.points.length) { finishRace(); return; }
+        showRing(ringIndex, activeRace.points[ringIndex]);
+        toast(world, `Checkpoint ${ringIndex}/${activeRace.points.length} — ${Math.ceil(raceClock)}s left.`);
+      }
     }
-    updateRace(capped);
-    updatePackages(capped);
-    updateTaxi(capped);
+
+    // Taxi job: collect the passenger, then reach the destination.
+    if (taxi.state === 'pickup') {
+      if (Math.hypot(taxi.px - p.x, taxi.pz - p.z) < 5) {
+        taxi.state = 'dropoff';
+        toast(world, 'Passenger aboard — drive to the destination marker.');
+      }
+    } else if (taxi.state === 'dropoff') {
+      if (Math.hypot(taxi.dx - p.x, taxi.dz - p.z) < 6) {
+        const fare = Math.round(taxi.fare * taxiBonus());
+        addCash(world, fare);
+        toast(world, `Fare paid: $${fare}${taxiBonus() > 1 ? ' (depot bonus!)' : ''}.`);
+        pushEvent(world, {
+          type: 'activity-complete', kind: 'taxi', district: districtAt(taxi.dx, taxi.dz), amount: 3,
+        });
+        taxi = { state: 'idle', px: 0, pz: 0, dx: 0, dz: 0, fare: 0 };
+      }
+    }
   }
 
   return {
     update,
-    state,
-    progress,
+    races,
+    packages,
     startRace,
-    raceStatus,
-    packagesFound: () => progress.packagesFound.length,
-    taxiEarned: () => progress.taxiEarned,
+    cancelRace() {
+      if (!activeRace) return false;
+      activeRace = null;
+      hideRings();
+      return true;
+    },
+    startTaxi,
+    getRace() { return activeRace; },
+    getRaceTime() { return raceClock; },
+    getNextCheckpoint() {
+      if (!activeRace) return null;
+      return { ...activeRace.points[ringIndex], index: ringIndex, total: activeRace.points.length };
+    },
+    getRaceProgress() {
+      if (!activeRace) return 0;
+      return ringIndex / activeRace.points.length;
+    },
+    getTaxi() { return taxi; },
+    getPackagesFound() { return packages.filter((q) => q.taken).length; },
+    districtAt,
   };
 }

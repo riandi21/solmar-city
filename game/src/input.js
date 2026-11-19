@@ -1,139 +1,134 @@
-// Keyboard and pointer input for Solmar City. Held keys live in a Set the game
-// reads every step; one-shot presses (click = shoot) are latched and taken once.
-// Dragging with the mouse orbits the chase camera; the deltas are read by the
-// loop and cleared each frame, so a drag between frames is never lost twice.
-// Game keys never scroll the page: their defaults are prevented.
-//
-// The fields are plain mutable properties, on purpose: the player system
-// zeroes mouseDX/mouseDY after steering the camera with them, and combat
-// clears `clicked` after firing — both write straight to world.input.
-
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_SHOOT = 4;
-
-// Keys the game uses at all (held or one-shot). Anything here gets preventDefault.
-const GAME_KEYS = new Set([
-  'KeyW', 'KeyA', 'KeyS', 'KeyD',
-  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-  'ShiftLeft', 'ShiftRight', 'Space',
-  'KeyE', 'KeyF', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
-  'KeyQ', 'KeyR', 'KeyC',
-  // v3: KeyT starts a street race at a start gantry (activities.js),
-  // KeyN skips the day/night clock to dawn or dusk (daynight.js),
-  // KeyB buys a NOS refill and KeyV an armour vest at the shop.
-  'KeyT', 'KeyN', 'KeyB', 'KeyV',
-  'KeyM', 'KeyP', 'Escape', 'Enter',
-]);
-const PAUSE_KEYS = new Set(['KeyP', 'Escape']);
-const CONFIRM_KEYS = new Set(['Enter', 'Space']);
-
-export function createInput(canvas) {
+// Input for Solmar City: keyboard and mouse state, exposed on world.input.
+// Movement is WASD or arrows, Shift sprints on foot, boosts NOS while
+// driving and pops a wheelie on a bike, Space jumps, E enters or exits a
+// vehicle, F punches, number keys swap weapons, C changes the radio,
+// M mutes, P or Escape pauses, B buys a property, click shoots and
+// right-click zooms the sniper scope.
+export function createInput(world) {
   const input = {
-    /** Held keys, by KeyboardEvent.code ('KeyW', 'Space', 'ShiftLeft', ...). */
     keys: new Set(),
-    /** Mouse movement since the last update(), in pixels. */
+    justPressed: new Set(),
+    justReleased: new Set(),
     mouseDX: 0,
     mouseDY: 0,
-    /** True if the player clicked since the last consumeClick(). */
+    mouseX: 0,
+    mouseY: 0,
     clicked: false,
-
-    /** Take the latched click (true once per click, then false until the next). */
-    consumeClick() {
-      const was = input.clicked;
-      input.clicked = false;
-      return was;
-    },
-    /**
-     * v3 — edge detection for ordinary keys: true only on the frame the
-     * key went down, so systems that poll (races on T, time-skip on N)
-     * can use this instead of keeping their own prev-key state.
-     * update() snapshots the held set each frame for this.
-     */
-    pressed(code) {
-      return input.keys.has(code) && !prevKeys.has(code);
-    },
-    /** One-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-    /** Call once per frame after reading the deltas: clears them for next frame. */
-    update() {
-      input.mouseDX = 0;
-      input.mouseDY = 0;
-      // Snapshot the held keys AFTER the frame read them, so pressed()
-      // above can tell a fresh press from a held key next frame.
-      prevKeys = new Set(input.keys);
-    },
-    /** Convenience: is any of these codes held? */
-    any(...codes) {
-      for (const code of codes) if (input.keys.has(code)) return true;
-      return false;
-    },
+    rightHeld: false,
+    rightClicked: false,
+    wheel: 0,
   };
 
-  let actions = 0;
-  let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
-  // v3: the held-key set as of the last update() — pressed() diffs
-  // against it. Seeded empty so the first frame never reports a press.
-  let prevKeys = new Set();
+  const GAME_KEYS = [
+    'KeyW', 'KeyA', 'KeyS', 'KeyD',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Space', 'ShiftLeft', 'ShiftRight',
+  ];
 
-  window.addEventListener('keydown', (event) => {
-    if (!GAME_KEYS.has(event.code)) return;
-    event.preventDefault();
+  function onKeyDown(event) {
+    if (GAME_KEYS.includes(event.code)) event.preventDefault();
     if (!event.repeat) {
-      if (PAUSE_KEYS.has(event.code)) actions |= ACTION_PAUSE;
-      else if (CONFIRM_KEYS.has(event.code)) actions |= ACTION_CONFIRM;
+      input.keys.add(event.code);
+      input.justPressed.add(event.code);
     }
-    input.keys.add(event.code);
-  });
-  window.addEventListener('keyup', (event) => {
-    input.keys.delete(event.code);
-  });
-  // A key released while the tab is hidden never sends keyup: let go of all of
-  // them on blur so the player never drives off on their own.
-  window.addEventListener('blur', () => {
-    input.keys.clear();
-    dragging = false;
-  });
-
-  // Drag orbits the camera; a plain click (no drag) fires the pistol.
-  canvas.addEventListener('pointerdown', (event) => {
-    dragging = true;
-    lastX = event.clientX;
-    lastY = event.clientY;
-    canvas.setPointerCapture?.(event.pointerId);
-  });
-  canvas.addEventListener('pointermove', (event) => {
-    if (!dragging) return;
-    input.mouseDX += event.clientX - lastX;
-    input.mouseDY += event.clientY - lastY;
-    lastX = event.clientX;
-    lastY = event.clientY;
-  });
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    // A click is a press that barely moved: that is a shot, not a camera drag.
-    if (Math.abs(input.mouseDX) < 6 && Math.abs(input.mouseDY) < 6) {
-      input.clicked = true;
-      actions |= ACTION_SHOOT;
-    }
-    input.mouseDX = 0;
-    input.mouseDY = 0;
   }
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', () => {
-    dragging = false;
+
+  function onKeyUp(event) {
+    input.keys.delete(event.code);
+    input.justReleased.add(event.code);
+  }
+
+  function onMouseMove(event) {
+    input.mouseDX += event.movementX || 0;
+    input.mouseDY += event.movementY || 0;
+    input.mouseX = event.clientX;
+    input.mouseY = event.clientY;
+  }
+
+  function onMouseDown(event) {
+    if (event.button === 0) input.clicked = true;
+    if (event.button === 2) {
+      input.rightHeld = true;
+      input.rightClicked = true;
+    }
+  }
+
+  function onMouseUp(event) {
+    if (event.button === 2) input.rightHeld = false;
+  }
+
+  function onWheel(event) {
+    input.wheel += event.deltaY;
+  }
+
+  function onContextMenu(event) {
+    event.preventDefault();
+  }
+
+  function onBlur() {
+    input.keys.clear();
+    input.rightHeld = false;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mouseup', onMouseUp);
+  window.addEventListener('wheel', onWheel, { passive: true });
+  window.addEventListener('blur', onBlur);
+  if (world.renderer && world.renderer.domElement) {
+    world.renderer.domElement.addEventListener('contextmenu', onContextMenu);
+  } else if (world.canvas) {
+    world.canvas.addEventListener('contextmenu', onContextMenu);
+  }
+
+  input.isDown = function isDown(code) {
+    return input.keys.has(code);
+  };
+
+  input.wasPressed = function wasPressed(code) {
+    return input.justPressed.has(code);
+  };
+
+  // Edge-triggered actions (buying, entering a car) should fire once
+  // even if two systems both check the same press in one frame.
+  input.consumePressed = function consumePressed(code) {
+    if (!input.justPressed.has(code)) return false;
+    input.justPressed.delete(code);
+    return true;
+  };
+
+  input.moveX = function moveX() {
+    let x = 0;
+    if (input.keys.has('KeyA') || input.keys.has('ArrowLeft')) x -= 1;
+    if (input.keys.has('KeyD') || input.keys.has('ArrowRight')) x += 1;
+    return x;
+  };
+
+  input.moveY = function moveY() {
+    let y = 0;
+    if (input.keys.has('KeyW') || input.keys.has('ArrowUp')) y -= 1;
+    if (input.keys.has('KeyS') || input.keys.has('ArrowDown')) y += 1;
+    return y;
+  };
+
+  input.forwardAmount = function forwardAmount() {
+    if (input.keys.has('KeyW') || input.keys.has('ArrowUp')) return 1;
+    if (input.keys.has('KeyS') || input.keys.has('ArrowDown')) return -1;
+    return 0;
+  };
+
+  input.update = function update() {
+    input.justPressed.clear();
+    input.justReleased.clear();
     input.mouseDX = 0;
     input.mouseDY = 0;
-  });
-  // Right-click should not open a menu over the game.
-  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+    input.clicked = false;
+    input.rightClicked = false;
+    input.wheel = 0;
+  };
 
+  world.input = input;
   return input;
 }
