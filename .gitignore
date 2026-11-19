@@ -1,1 +1,6 @@
 out/
+# v3: local scratch — test logs, OS files, coverage reports. Never the
+# game itself: game/, screenshots/ and the vendored three.js are tracked.
+*.log
+.DS_Store
+coverage/
