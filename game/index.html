@@ -1,110 +1,65 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Solmar City</title>
-<script type="importmap">
-{
-  "imports": {
-    "three": "./vendor/three.module.min.js"
-  }
-}
-</script>
+<meta name="description" content="Solmar City — an original sun-soaked coastal open-world crime game. Drive, fight and hustle across the city as Rico Vega.">
+<title>Solmar City — Open-World Crime Game</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0f14; font-family: Verdana, Geneva, sans-serif; color: #e8e8e8; }
-  #game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  .panel { background: rgba(8, 14, 20, 0.72); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; padding: 8px 12px; }
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; font-size: 14px; }
-  #hud-top-left { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; }
-  #hud-cash { font-size: 20px; font-weight: bold; color: #7dff9b; }
-  #hud-stars { color: #ffd23f; font-size: 18px; letter-spacing: 2px; }
-  .bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-  .bar-label { width: 46px; color: #b8c4cc; }
-  .bar-track { width: 150px; height: 12px; background: rgba(255, 255, 255, 0.15); border-radius: 6px; overflow: hidden; }
-  .bar-fill { height: 100%; width: 100%; text-align: center; font-size: 10px; line-height: 12px; color: #06121a; font-weight: bold; }
-  #hud-health { background: #2ee66b; }
-  #hud-armor { background: #4db8ff; }
-  #hud-top-right { position: absolute; top: 12px; right: 12px; text-align: right; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
-  #hud-clock { font-size: 18px; font-weight: bold; }
-  #hud-district { color: #ffd23f; font-size: 15px; }
-  #hud-objective { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); max-width: 44%; text-align: center; font-size: 14px; color: #ffe9a8; }
-  #hud-mission { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); font-size: 12px; color: #9fd8ff; }
-  #hud-activity { position: absolute; top: 88px; left: 50%; transform: translateX(-50%); font-size: 12px; color: #c9f7c9; }
-  #hud-toast { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); font-size: 16px; color: #fff; background: rgba(8, 14, 20, 0.8); padding: 8px 16px; border-radius: 8px; display: none; }
-  #hud-bottom-left { position: absolute; bottom: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; }
-  #hud-weapon { font-size: 15px; }
-  #hud-speed { font-size: 22px; font-weight: bold; }
-  #minimap-wrap { position: absolute; bottom: 12px; right: 12px; }
-  #minimap { width: 200px; height: 200px; border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 8px; background: rgba(8, 18, 28, 0.85); display: block; }
-  #menu { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; background: rgba(4, 8, 12, 0.82); }
-  #menu-card { max-width: 560px; width: 92%; text-align: center; padding: 32px; background: rgba(10, 18, 26, 0.95); border: 1px solid rgba(255, 210, 63, 0.4); border-radius: 12px; }
-  #menu-card h1 { font-size: 44px; letter-spacing: 4px; color: #ffd23f; margin-bottom: 8px; }
-  #menu-card h2 { font-size: 15px; font-weight: normal; color: #9fd8ff; margin-bottom: 16px; }
-  #menu-card p.story { font-size: 14px; line-height: 1.6; color: #d8dee2; margin-bottom: 20px; }
-  #start-btn { pointer-events: auto; cursor: pointer; font-size: 20px; font-weight: bold; letter-spacing: 2px; color: #06121a; background: #ffd23f; border: none; border-radius: 8px; padding: 14px 42px; margin-bottom: 20px; }
-  #start-btn:hover { background: #ffe066; }
-  #menu-card .controls { text-align: left; font-size: 12px; line-height: 1.8; color: #b8c4cc; columns: 2; column-gap: 28px; }
-  #menu-card .controls b { color: #e8e8e8; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0c141c; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f2f2f2; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #hud-top { position: absolute; top: 12px; right: 16px; display: flex; gap: 18px; align-items: center; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #hud-cash { font-size: 26px; color: #7dff9e; }
+  #hud-clock { font-size: 18px; }
+  #hud-district { font-size: 15px; color: #ffd23d; }
+  #hud-wanted { font-size: 20px; color: #ffd23d; letter-spacing: 2px; }
+  #hud-wanted.hot { color: #ff5a5a; }
+  #hud-health-wrap { position: absolute; top: 52px; right: 16px; display: flex; gap: 8px; align-items: center; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #hud-health-bar { width: 170px; height: 13px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); }
+  #hud-health-fill { height: 100%; width: 100%; background: #3ddc84; }
+  #hud-health-fill.low { background: #ff5a5a; }
+  #hud-armor { position: absolute; top: 76px; right: 16px; font-size: 13px; font-weight: 700; color: #8ecbff; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #hud-weapon { position: absolute; top: 98px; right: 16px; font-size: 14px; font-weight: 700; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #hud-speed { position: absolute; bottom: 18px; right: 18px; font-size: 30px; font-weight: 800; text-shadow: 0 2px 4px rgba(0,0,0,.85); }
+  #hud-nos-wrap { position: absolute; bottom: 60px; right: 18px; display: flex; gap: 8px; align-items: center; font-weight: 700; font-size: 13px; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #hud-nos-bar { width: 130px; height: 10px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.35); }
+  #hud-nos-fill { height: 100%; width: 100%; background: #ff8c2e; }
+  #hud-objective { position: absolute; top: 12px; left: 16px; max-width: 430px; font-size: 15px; font-weight: 700; background: rgba(0,0,0,.5); padding: 8px 12px; border-left: 4px solid #ffd23d; }
+  #hud-mission-tracker { position: absolute; top: 64px; left: 16px; font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 10px; }
+  #hud-activity { position: absolute; top: 94px; left: 16px; font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 10px; }
+  #hud-heist { position: absolute; top: 124px; left: 16px; font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 10px; color: #ffd23d; }
+  #hud-revenge { position: absolute; top: 154px; left: 16px; font-size: 13px; background: rgba(0,0,0,.45); padding: 5px 10px; color: #ff9d5c; }
+  #hud-territory { position: absolute; bottom: 218px; left: 16px; font-size: 12px; background: rgba(0,0,0,.5); padding: 6px 10px; }
+  #hud-bike { position: absolute; bottom: 248px; left: 16px; font-size: 12px; background: rgba(0,0,0,.5); padding: 6px 10px; }
+  #hud-tire { position: absolute; bottom: 278px; left: 16px; font-size: 13px; font-weight: 700; background: rgba(120,0,0,.65); padding: 6px 10px; }
+  #hud-properties { position: absolute; bottom: 18px; left: 222px; font-size: 12px; background: rgba(0,0,0,.5); padding: 6px 10px; max-width: 420px; }
+  #hud-toast { position: absolute; top: 38%; left: 50%; transform: translate(-50%, -50%); font-size: 20px; font-weight: 800; text-align: center; background: rgba(0,0,0,.65); padding: 12px 22px; border-radius: 6px; opacity: 0; transition: opacity .25s; max-width: 640px; }
+  #hud-toast.show { opacity: 1; }
+  #hud-minimap { position: absolute; bottom: 12px; left: 12px; width: 200px; height: 200px; border: 2px solid rgba(255,255,255,.55); border-radius: 4px; background: rgba(12,20,28,.82); }
+  #menu { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: linear-gradient(180deg, rgba(8,20,32,.82), rgba(8,20,32,.55)); text-align: center; padding: 24px; }
+  #menu.hidden, #pause-note.hidden { display: none; }
+  #menu-title { font-size: 54px; font-weight: 900; letter-spacing: 4px; color: #ffd23d; text-shadow: 0 3px 0 #b3541e, 0 6px 18px rgba(0,0,0,.7); margin: 0; }
+  #menu-text { max-width: 560px; font-size: 16px; line-height: 1.5; margin: 0; }
+  #menu-controls { font-size: 13px; line-height: 1.7; color: #cfe3ef; }
+  #start-button { pointer-events: auto; font-size: 20px; font-weight: 800; padding: 12px 34px; border: none; border-radius: 6px; background: #ffd23d; color: #20242a; cursor: pointer; }
+  #start-button:hover { background: #ffe27a; }
+  #pause-note { position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%); z-index: 9; font-size: 34px; font-weight: 900; letter-spacing: 3px; background: rgba(0,0,0,.65); padding: 14px 30px; border-radius: 8px; }
 </style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
 </head>
 <body>
-<canvas id="game-canvas"></canvas>
-
-<div id="hud">
-  <div id="hud-top-left">
-    <div id="hud-cash" class="panel">$0</div>
-    <div id="hud-stars" class="panel">☆☆☆☆☆</div>
-    <div class="panel">
-      <div class="bar-row"><span class="bar-label">HEALTH</span><div class="bar-track"><div id="hud-health" class="bar-fill">100</div></div></div>
-      <div class="bar-row"><span class="bar-label">ARMOR</span><div class="bar-track"><div id="hud-armor" class="bar-fill">0</div></div></div>
-    </div>
-  </div>
-  <div id="hud-top-right">
-    <div id="hud-clock" class="panel">08:00 Day</div>
-    <div id="hud-district" class="panel">Solmar City</div>
-  </div>
-  <div id="hud-objective" class="panel">Free roam — explore Solmar City</div>
-  <div id="hud-mission" class="panel">No active mission</div>
-  <div id="hud-activity" class="panel" style="display:none"></div>
-  <div id="hud-toast"></div>
-  <div id="hud-bottom-left">
-    <div id="hud-weapon" class="panel">Pistol • 999</div>
-    <div id="hud-speed" class="panel">0 km/h</div>
-    <div id="hud-radio" class="panel" style="display:none"></div>
-  </div>
-  <div id="minimap-wrap"><canvas id="minimap" width="200" height="200"></canvas></div>
-</div>
-
+<canvas id="game" aria-label="Solmar City: an open-world crime game. Drive, fight and hustle across the city."></canvas>
+<div id="hud"></div>
+<div id="pause-note" class="hidden">PAUSED — press P to resume</div>
 <div id="menu">
-  <div id="menu-card">
-    <h1>SOLMAR CITY</h1>
-    <h2>A neon open-world crime story</h2>
-    <p class="story">Rico Vega came back to Solmar City with nothing but a busted sedan and a debt:
-    <b>$5,000 owed to Madame Coral</b>, and she does not wait. Run her sixteen jobs —
-    chases, heists, races, the harbor war — earn the cash, and buy your way out
-    before the city eats you.</p>
-    <button id="start-btn" type="button">START</button>
-    <div class="controls">
-      <div><b>WASD / Arrows</b> — move / drive</div>
-      <div><b>Shift</b> — sprint / NOS boost</div>
-      <div><b>Space</b> — jump / handbrake</div>
-      <div><b>E</b> — enter / exit car or boat</div>
-      <div><b>F</b> — punch</div>
-      <div><b>1–5</b> — weapons</div>
-      <div><b>C</b> — radio station</div>
-      <div><b>M</b> — mute</div>
-      <div><b>P / Esc</b> — pause</div>
-      <div><b>N</b> — skip to night</div>
-      <div><b>R</b> — race &nbsp; <b>Y</b> — taxi</div>
-      <div><b>Q</b> — slots</div>
-      <div><b>H / J / K / L / U</b> — shop buys</div>
-      <div><b>T</b> — safehouse ($300)</div>
-    </div>
-  </div>
+  <h1 id="menu-title">SOLMAR CITY</h1>
+  <p id="menu-text">Rico Vega owes Madame Coral $5,000. Drive, fight and hustle your way out — and settle the score with the Dourado cartel.</p>
+  <button id="start-button" type="button">Start Game</button>
+  <p id="menu-controls">WASD drive / walk &nbsp;·&nbsp; Shift sprint / NOS / wheelie &nbsp;·&nbsp; Space jump &nbsp;·&nbsp; E enter vehicle &nbsp;·&nbsp; F punch<br>Click shoot &nbsp;·&nbsp; Right-click sniper zoom &nbsp;·&nbsp; 1–5 weapons &nbsp;·&nbsp; C radio &nbsp;·&nbsp; M mute &nbsp;·&nbsp; B buy property &nbsp;·&nbsp; P pause</p>
 </div>
-
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
