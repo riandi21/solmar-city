@@ -1,275 +1,512 @@
-// Bootstrap for Solmar City: builds the world, wires every system in
-// step order, runs the frame loop, and owns the menu / start / pause
-// flow. Every system is guarded, so a missing or failed system can
-// never crash the loop, and the game stays playable while the city
-// is still being built. window.__game exposes the world for tests.
-import { createWorld } from './world.js';
-import { createRenderer } from './render.js';
-import { createCity } from './city.js';
-import { createDocks } from './docks.js';
-import { createPlayer } from './player.js';
-import { createVehicles } from './vehicles.js';
-import { createMotorcycles } from './motorcycles.js';
-import { createTraffic } from './traffic.js';
-import { createPolice } from './police.js';
-import { createMissions } from './missions.js';
-import { createCombat } from './combat.js';
-import { createHeli } from './heli.js';
-import { createShops } from './shops.js';
-import { createDayNight } from './daynight.js';
-import { createOldTown } from './oldtown.js';
-import { createPoliceAI } from './policeai.js';
-import { createMissions3 } from './missions3.js';
-import { createActivities } from './activities.js';
-import { createMissions4 } from './missions4.js';
-import { createBoats } from './boats.js';
-import { createWeather } from './weather.js';
-import { createCasino } from './casino.js';
-import { createProperties } from './properties.js';
-import { createTerritories } from './territories.js';
-import { createMissions5 } from './missions5.js';
-import { createMissions6 } from './missions6.js';
+// Solmar City bootstrap: creates the world, wires every system in step order,
+// runs the frame loop with a third-person follow camera, pause AND resume (P
+// toggles both ways), and the menu/start flow.
+//
+// WIRING CONTRACTS (Round 12, proven): createCity takes (scene, world) —
+// never (scene, rng). createRng returns a CALLABLE function. world.systems
+// is an ARRAY, initialised as [] before any system is wired. wire() NEVER
+// overwrites world state fields (player, traffic, crew, boats, seaplane,
+// properties, territories, empire, weather, daynight, heat, garage) with
+// system objects — systems live in world.systems or world.systemObjects.
+// wire() tries (scene, world) first, then (world); traffic gets its 3rd
+// arg: traffic(scene, world, city). The city is built FIRST. The bootstrap
+// uses the renderer's scene and camera — never a second scene.
+
+import * as THREE from 'three';
 import { createAudio } from './audio.js';
-import { createInput } from './input.js';
+import { createInput, ACTION_PAUSE, ACTION_CONFIRM } from './input.js';
 import { createHud } from './hud.js';
 import { createShots } from './shots.js';
-import { createSave } from './save.js';
 
-// The wiring order from the brief: city first, Dourado Revenge last.
-const STEP_ORDER = [
-  'city', 'docks', 'player', 'vehicles', 'motorcycles', 'traffic',
-  'police', 'missions', 'combat', 'heli', 'shops', 'daynight',
-  'oldtown', 'policeai', 'missions3', 'activities', 'missions4',
-  'boats', 'weather', 'casino', 'properties', 'territories',
-  'missions5', 'missions6',
-];
-
-const FACTORIES = {
-  city: createCity,
-  docks: createDocks,
-  player: createPlayer,
-  vehicles: createVehicles,
-  motorcycles: createMotorcycles,
-  traffic: createTraffic,
-  police: createPolice,
-  missions: createMissions,
-  combat: createCombat,
-  heli: createHeli,
-  shops: createShops,
-  daynight: createDayNight,
-  oldtown: createOldTown,
-  policeai: createPoliceAI,
-  missions3: createMissions3,
-  activities: createActivities,
-  missions4: createMissions4,
-  boats: createBoats,
-  weather: createWeather,
-  casino: createCasino,
-  properties: createProperties,
-  territories: createTerritories,
-  missions5: createMissions5,
-  missions6: createMissions6,
-};
-
+const STEP = 1 / 60;
 const MAX_FRAME = 0.25;
 
 const params = new URLSearchParams(window.location.search);
-const shotParam = params.get('shot') || '';
+const shotParam = params.get('shot');
+const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
+const seed = Number.isInteger(seedParam) ? seedParam : (Math.random() * 4294967296) >>> 0;
 
-const canvas = document.getElementById('game');
-const world = createWorld();
-const renderHandle = createRenderer(canvas);
+// Step order from the Round 11 brief. The shots module mirrors this order.
+const STEP_ORDER = [
+  ['city', './city.js'],
+  ['northhills', './northhills.js'],
+  ['islands', './islands.js'],
+  ['vineyards', './vineyards.js'],
+  ['havana', './havana.js'],
+  ['sunsetbeach', './sunsetbeach.js'],
+  ['player', './player.js'],
+  ['vehicles', './vehicles.js'],
+  ['motorcycles', './motorcycles.js'],
+  ['jetski', './jetski.js'],
+  ['crew', './crew.js'],
+  ['traffic', './traffic.js'],
+  ['police', './police.js'],
+  ['missions', './missions.js'],
+  ['combat', './combat.js'],
+  ['helicopter', './heli.js'],
+  ['playerheli', './playerheli.js'],
+  ['shops', './shops.js'],
+  ['garage', './garage.js'],
+  ['daynight', './daynight.js'],
+  ['oldtown', './oldtown.js'],
+  ['policeai', './policeai.js'],
+  ['harborwar', './missions3.js'],
+  ['activities', './activities.js'],
+  ['airportjob', './missions4.js'],
+  ['boats', './boats.js'],
+  ['seaplane', './seaplane.js'],
+  ['weather', './weather.js'],
+  ['casino', './casino.js'],
+  ['properties', './properties.js'],
+  ['territories', './territories.js'],
+  ['casinoheist', './missions5.js'],
+  ['douradorevenge', './missions6.js'],
+  ['coralcrown', './missions7.js'],
+  ['solmarlegacy', './missions8.js'],
+  ['donsgambit', './missions9.js'],
+  ['viceking', './missions10.js'],
+  ['kingpin', './missions11.js'],
+  ['empire', './empire.js'],
+  ['heat', './heat.js'],
+  ['cartel', './cartel.js'],
+  ['fishing', './fishing.js'],
+];
 
-world.canvas = canvas;
-world.scene = renderHandle.scene;
-world.camera = renderHandle.camera;
-world.renderer = renderHandle.renderer;
-if (renderHandle.sun) world.sun = renderHandle.sun;
-if (renderHandle.hemi) world.hemi = renderHandle.hemi;
-world.systems = {};
-world.mode = 'menu';
-world.elapsed = world.elapsed || 0;
-world.stats = { frames: 0, seconds: 0, startedAt: Date.now() };
-
-function wireSystem(name, factory) {
-  if (typeof factory !== 'function') return null;
-  try {
-    const system = factory(world);
-    if (system) world.systems[name] = system;
-    return system || null;
-  } catch (error) {
-    console.warn('Solmar City: system failed to start:', name, error);
-    return null;
-  }
+function pascal(name) {
+  return name.replace(/(^|[^a-zA-Z0-9])([a-zA-Z0-9])/g, (_, __, c) => c.toUpperCase());
 }
 
-function updateSystem(name, dt) {
-  const system = world.systems[name];
-  if (system && typeof system.update === 'function') {
+// Fallback world builder, used only if world.js cannot be imported. Mirrors the
+// shared-state section of the Round 11 brief. currentVehicle() checks the
+// boarded flag first (v12 fix): a merely-present heli/seaplane state object
+// must never count as "aboard".
+function buildFallbackWorld(rng) {
+  const player = {
+    position: new THREE.Vector3(58, 0, 29),
+    heading: 0,
+    speed: 0,
+    onFoot: true,
+    health: 100,
+    mesh: null,
+    currentCar: null,
+    currentBike: null,
+    currentBoat: null,
+    currentJetSki: null,
+    currentVehicle() {
+      if (this.currentCar) return this.currentCar;
+      if (this.currentBike) return this.currentBike;
+      if (this.currentBoat) return this.currentBoat;
+      if (this.currentJetSki) return this.currentJetSki;
+      return null;
+    },
+  };
+  return {
+    rng,
+    config: { seed },
+    scene: null,
+    camera: null,
+    renderer: null,
+    player,
+    cars: [],
+    bikes: [],
+    boats: [],
+    jetSkis: [],
+    seaplane: { mesh: null, position: new THREE.Vector3(320, 0, 200), heading: 0, speed: 0, altitude: 0, onWater: true, boarded: false },
+    playerHeli: { mesh: null, position: new THREE.Vector3(29, 78, 29), heading: 0, speed: 0, altitude: 0, rotor: 0, onGround: true, boarded: false },
+    playerBoat: null,
+    playerBike: null,
+    pedestrians: [],
+    crewMembers: [],
+    federalAgents: [],
+    cartelHitmen: [],
+    enemies: [],
+    gangShooters: [],
+    wanted: 0,
+    heat: 0,
+    cartelThreat: 0,
+    cash: 500,
+    armor: 0,
+    nos: 100,
+    tireDamage: 0,
+    mission: { id: 0, stage: 0, objective: '', marker: null, timer: 0 },
+    completedMissions: [],
+    elapsed: 0,
+    timeOfDay: 12,
+    mode: 'menu',
+    input: { keys: new Set(), justPressed: new Set(), mouseDown: false, muteToggle: false, radioNext: false },
+    events: [],
+    city: null,
+    properties: { list: [], income: 0, lastPayout: 0 },
+    territories: { districts: [] },
+    heist: { progress: '' },
+    revenge: { progress: '' },
+    crown: { progress: '', informantMet: false, vaultCracked: false, betrayalSurvived: false, donDefeated: false },
+    legacy: { progress: '', protectionCollected: 0, ledgerStolen: false, blockadeBroken: false, legacySecured: false },
+    gambit: { progress: '', fedsEvaded: false, moneyMoved: false, moleExposed: false, gambitWon: false },
+    vice: { progress: '', casinoRigged: false, highRollerWon: false, havanaRunDone: false, viceKingCrowned: false, casinoWinnings: 0, leaguePoints: 0, leagueWins: 0, nightclubIncome: 0 },
+    kingpin: { progress: '', shipmentSeized: false, informantProtected: false, siegeSurvived: false, kingpinCrowned: false, cartelThreat: 0, fishingBestCatch: '', jetSkiBestTime: 0 },
+    crew: { hired: [], posts: {} },
+    garage: { ownedCars: [], upgrades: {} },
+    empire: { income: 0, posts: {}, rivalThreat: 0 },
+    heatState: { level: 0, lastCrime: 0, raidTimer: 0 },
+    combat: { weapon: 'Pistol', ammo: 60 },
+    fishing: { rodInHand: false, waiting: false, spots: [] },
+    jetski: { riding: false, speed: 0 },
+    vehicles: null,
+    daynight: { hours: 12 },
+    weather: { raining: false, fog: 0 },
+    audioStation: 'Coral FM',
+    currentDistrict: 'Downtown',
+    activity: { text: '' },
+    systems: [],
+    systemObjects: {},
+    saveVersion: 9,
+  };
+}
+
+function fallbackRenderer(canvas) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87b5d6);
+  scene.fog = new THREE.Fog(0x9fc3dd, 300, 900);
+  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
+  camera.position.set(58, 8, 45);
+  const sun = new THREE.DirectionalLight(0xffe0b3, 2.2);
+  sun.position.set(200, 300, 100);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -320;
+  sun.shadow.camera.right = 320;
+  sun.shadow.camera.top = 320;
+  sun.shadow.camera.bottom = -320;
+  scene.add(sun);
+  const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 0.9);
+  scene.add(hemi);
+  return {
+    renderer, scene, camera, sun, hemi,
+    resize() {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+    },
+    render() { renderer.render(scene, camera); },
+    update() {},
+  };
+}
+
+async function boot() {
+  const canvas = document.getElementById('game');
+  const status = document.getElementById('status');
+
+  // RNG: createRng must return a CALLABLE function (Round 12 contract).
+  let rng = null;
+  try {
+    const randomMod = await import('./random.js');
+    const makeRng = randomMod.createRandom || randomMod.createRng || randomMod.default;
+    rng = makeRng ? makeRng(seed) : null;
+  } catch { rng = null; }
+  if (typeof rng !== 'function') {
+    let s = seed >>> 0;
+    const fallback = () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+    fallback.range = (a, b) => a + fallback() * (b - a);
+    fallback.pick = (arr) => arr[Math.floor(fallback() * arr.length)];
+    rng = fallback;
+  }
+  // Prove the rng is callable before anything else uses it.
+  const probe = rng();
+  if (typeof probe !== 'number') throw new Error('rng() did not return a number');
+
+  // World: prefer W1's world.js; fall back to the inline builder.
+  let world = null;
+  try {
+    const worldMod = await import('./world.js');
+    const makeWorld = worldMod.createWorld || worldMod.default;
+    if (makeWorld) world = makeWorld(rng);
+  } catch { world = null; }
+  if (!world || !world.player || !world.player.position) world = buildFallbackWorld(rng);
+  world.rng = rng;
+  world.systems = [];
+  world.systemObjects = {};
+  if (!world.input) world.input = { keys: new Set(), justPressed: new Set(), mouseDown: false };
+  if (!Array.isArray(world.events)) world.events = [];
+
+  // Renderer: use W1's render.js scene + camera; never a second scene.
+  let renderHandle = null;
+  try {
+    const renderMod = await import('./render.js');
+    const makeRenderer = renderMod.createRenderer || renderMod.default;
+    if (makeRenderer) renderHandle = makeRenderer(canvas);
+  } catch { renderHandle = null; }
+  if (!renderHandle || !renderHandle.scene || !renderHandle.camera) {
+    renderHandle = fallbackRenderer(canvas);
+  }
+  world.scene = renderHandle.scene;
+  world.camera = renderHandle.camera;
+  world.renderer = renderHandle.renderer;
+  const scene = renderHandle.scene;
+  const camera = renderHandle.camera;
+
+  window.addEventListener('resize', () => {
+    if (renderHandle.resize) renderHandle.resize();
+  });
+
+  const audio = createAudio(world);
+  const input = createInput(world, canvas);
+  const hud = createHud(world);
+  world.input.keys = input.keys;
+  world.input.justPressed = input.justPressed;
+
+  // wire(): tries (scene, world) first, then (world). Traffic gets city as
+  // 3rd arg. Results go to world.systems (array) / world.systemObjects —
+  // NEVER onto a world state field.
+  let city = null;
+  async function wire(name, path) {
+    let mod = null;
     try {
-      system.update(dt);
-    } catch (error) {
-      console.warn('Solmar City: system update failed:', name, error);
+      mod = await import(path);
+    } catch (err) {
+      console.warn('[wire] missing module', name, path, err && err.message);
+      return null;
+    }
+    const candidates = [
+      mod['create' + pascal(name)],
+      mod.default,
+      mod[name],
+    ];
+    let factory = null;
+    for (const c of candidates) if (typeof c === 'function') { factory = c; break; }
+    if (!factory) {
+      const fns = Object.values(mod).filter((v) => typeof v === 'function');
+      if (fns.length === 1) factory = fns[0];
+    }
+    if (!factory) {
+      console.warn('[wire] no factory in', name);
+      return null;
+    }
+    let sys = null;
+    try {
+      if (name === 'traffic') sys = factory(scene, world, city);
+      else sys = factory(scene, world);
+    } catch (err1) {
+      try {
+        sys = name === 'traffic' ? factory(world, city) : factory(world);
+      } catch (err2) {
+        console.warn('[wire] factory failed', name, err2 && err2.message, '| first:', err1 && err1.message);
+        return null;
+      }
+    }
+    if (sys) {
+      world.systems.push(sys);
+      world.systemObjects[name] = sys;
+    }
+    return sys;
+  }
+
+  // City FIRST so world.city (roads + colliders) exists for every later system.
+  const citySys = await wire('city', './city.js');
+  city = citySys && citySys.roads ? citySys : (world.city || null);
+  if (city) world.city = city;
+
+  for (const [name, path] of STEP_ORDER) {
+    if (name === 'city') continue;
+    await wire(name, path);
+  }
+
+  // Re-assert the wiring contracts after every system has run.
+  if (!Array.isArray(world.systems)) world.systems = [];
+  if (!world.player || !world.player.position) {
+    const fresh = buildFallbackWorld(rng);
+    world.player = fresh.player;
+  }
+  // Keep the render handle reachable for later systems (weather, day/night).
+  world.renderHandle = renderHandle;
+  if (world.daynight && typeof world.daynight.hours !== 'number') {
+    world.daynight.hours = world.timeOfDay || 12;
+  }
+
+  const shots = createShots(world, {
+    canvas,
+    render() { draw(); },
+    step(dt) { stepWorld(dt); },
+    setTime(hours) {
+      world.timeOfDay = hours;
+      // The day/night system owns the clock (state.timeOfDay); the old
+      // hook only wrote world.timeOfDay, which the next step overwrote
+      // back to morning — so sunset shots rendered at 10:00. Drive the
+      // real clock so the shot's dusk/sunset actually shows.
+      const dn = world.systemObjects && world.systemObjects.daynight;
+      if (dn && typeof dn.setTime === 'function') dn.setTime(hours);
+      if (world.daynight) {
+        world.daynight.timeOfDay = hours;
+        world.daynight.hours = hours;
+      }
+    },
+  });
+  window.__shots = shots;
+  window.__solmar = { world, shots, audio, hud, input };
+
+  function stepWorld(dt) {
+    world.elapsed = (world.elapsed || 0) + dt;
+    if (world.daynight && typeof world.daynight.hours === 'number') {
+      world.daynight.hours = (world.daynight.hours + dt / 240) % 24;
+      world.timeOfDay = world.daynight.hours;
+    }
+    for (const sys of world.systems) {
+      if (!sys) continue;
+      try {
+        if (typeof sys.update === 'function') sys.update(dt);
+        else if (typeof sys === 'function') sys(dt);
+      } catch (err) {
+        console.error('[system] update failed', err);
+      }
+    }
+    if (audio) audio.update(dt);
+  }
+
+  function updateCamera(dt) {
+    const p = world.player && world.player.position;
+    if (!p) return;
+    const heading = world.player.heading || 0;
+    const back = 10;
+    const up = 6;
+    const tx = p.x - Math.sin(heading) * back;
+    const tz = p.z - Math.cos(heading) * back;
+    const ty = (p.y || 0) + up;
+    const k = 1 - Math.pow(0.001, dt);
+    camera.position.x += (tx - camera.position.x) * k;
+    camera.position.y += (ty - camera.position.y) * k;
+    camera.position.z += (tz - camera.position.z) * k;
+    camera.lookAt(p.x, (p.y || 0) + 1.6, p.z);
+  }
+
+  function draw() {
+    // Pass the world through: render.update(dt, world) is what runs the
+    // follow camera (follow(world.player)) and the time-of-day sun. With
+    // no args it never followed, so shot frames stayed at boot position.
+    if (renderHandle.update) renderHandle.update(STEP, world);
+    if (renderHandle.render) renderHandle.render();
+    else if (renderHandle.renderer) renderHandle.renderer.render(scene, camera);
+  }
+
+  function announce(message) {
+    if (status) status.textContent = message;
+  }
+
+  function showMenu(show) {
+    const menu = document.getElementById('menu');
+    if (menu) menu.style.display = show ? 'flex' : 'none';
+  }
+
+  function showPause(show) {
+    const pause = document.getElementById('pause-overlay');
+    if (pause) pause.style.display = show ? 'flex' : 'none';
+  }
+
+  function startGame() {
+    world.mode = 'play';
+    showMenu(false);
+    showPause(false);
+    audio.unlock();
+    announce('Playing. Rico Vega is on the streets of Solmar City.');
+    hud.toast('Welcome to Solmar City — steal a car, take a mission, become Kingpin.');
+  }
+
+  function togglePause() {
+    if (world.mode === 'play') {
+      world.mode = 'pause';
+      showPause(true);
+      announce('Paused.');
+    } else if (world.mode === 'pause') {
+      world.mode = 'play';
+      showPause(false);
+      announce('Playing.');
     }
   }
-}
 
-// Input, audio and HUD first: other systems read world.input and
-// call world.toast from their first frame onward.
-wireSystem('input', createInput);
-wireSystem('audio', createAudio);
-wireSystem('hud', createHud);
-for (const name of STEP_ORDER) wireSystem(name, FACTORIES[name]);
-wireSystem('save', createSave);
-wireSystem('shots', createShots);
+  function stepFrame(dt) {
+    if (world.mode !== 'play') return;
+    if (input.pressed('KeyM') || world.input.muteToggle) {
+      audio.toggleMute();
+      world.input.muteToggle = false;
+    }
+    if (input.pressed('KeyC') || world.input.radioNext) {
+      world.audioStation = audio.nextStation();
+      hud.toast('Radio: ' + world.audioStation);
+      world.input.radioNext = false;
+    }
+    stepWorld(dt);
+    hud.update(dt);
+  }
 
-window.__game = world;
-
-const menuEl = document.getElementById('menu');
-const menuTitle = document.getElementById('menu-title');
-const menuText = document.getElementById('menu-text');
-const startButton = document.getElementById('start-button');
-const pauseNote = document.getElementById('pause-note');
-
-function showMenu(title, text) {
-  if (menuTitle && title) menuTitle.textContent = title;
-  if (menuText && text) menuText.textContent = text;
-  if (menuEl) menuEl.classList.remove('hidden');
-  if (startButton) startButton.textContent = world.mode === 'menu' ? 'Start Game' : 'Play Again';
-}
-
-function hideMenu() {
-  if (menuEl) menuEl.classList.add('hidden');
-}
-
-function startGame() {
-  if (world.mode === 'over' || world.mode === 'busted') {
-    window.location.reload();
+  if (shotParam) {
+    world.mode = 'play';
+    showMenu(false);
+    const result = shots.capture(shotParam);
+    void result;
+    // The shot path used to return before the frame loop ever ran, so the
+    // follow camera never moved. Settle it onto the player now: the lerp
+    // closes ~11% per STEP, so 60 settles land it on the target.
+    // hud.update also never ran in shot mode, so the wanted stars,
+    // objective line and minimap would have stayed at boot values.
+    for (let i = 0; i < 60; i += 1) updateCamera(STEP);
+    hud.update(STEP);
+    draw();
+    requestAnimationFrame(() => {
+      for (let i = 0; i < 60; i += 1) updateCamera(STEP);
+      hud.update(STEP);
+      draw();
+      window.__shotReady = true;
+    });
     return;
   }
-  world.mode = 'play';
-  world.stats.startedAt = Date.now();
-  hideMenu();
-  const audio = world.systems.audio;
-  if (audio && typeof audio.resume === 'function') audio.resume();
-  if (world.toast) world.toast('Welcome to Solmar City, Rico. Madame Coral is waiting.');
-}
 
-function togglePause() {
-  if (world.mode === 'play') {
-    world.mode = 'pause';
-    if (pauseNote) pauseNote.classList.remove('hidden');
-    const save = world.systems.save;
-    if (save && typeof save.save === 'function') {
-      try { save.save(); } catch (error) { console.warn('Save on pause failed:', error); }
+  // Menu / start flow.
+  showMenu(true);
+  const startBtn = document.getElementById('start-btn');
+  if (startBtn) startBtn.addEventListener('click', () => { audio.unlock(); startGame(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && world.mode === 'play') togglePause();
+  });
+
+  let last = performance.now();
+  let accumulator = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    last = now;
+    const actions = input.takeActions();
+    if (actions & ACTION_PAUSE) togglePause();
+    if ((actions & ACTION_CONFIRM) && world.mode === 'menu') startGame();
+    else if ((actions & ACTION_CONFIRM) && world.mode === 'over') startGame();
+    if (world.mode === 'menu' || world.mode === 'play') {
+      while (accumulator >= STEP && (world.mode === 'menu' || world.mode === 'play')) {
+        if (world.mode === 'play') stepFrame(STEP);
+        else stepWorld(STEP);
+        accumulator -= STEP;
+      }
+    } else {
+      accumulator = 0;
     }
-  } else if (world.mode === 'pause') {
-    world.mode = 'play';
-    if (pauseNote) pauseNote.classList.add('hidden');
+    updateCamera(STEP);
+    draw();
+    input.endFrame();
   }
-}
 
-function renderFrame() {
-  if (renderHandle && typeof renderHandle.render === 'function') {
-    try { renderHandle.render(); } catch (error) { console.warn('Render failed:', error); }
-  } else if (world.renderer && world.scene && world.camera) {
-    try { world.renderer.render(world.scene, world.camera); } catch (error) { console.warn('Render failed:', error); }
-  }
-  if (renderHandle && typeof renderHandle.update === 'function') {
-    try { renderHandle.update(); } catch (error) { console.warn('Renderer update failed:', error); }
-  }
-}
-
-let last = performance.now();
-let fpsFrames = 0;
-let fpsTime = 0;
-
-function frame(now) {
+  announce('Solmar City. Press Space or click Start to play.');
   requestAnimationFrame(frame);
-  const dt = Math.min((now - last) / 1000 || 0, MAX_FRAME);
-  last = now;
-  fpsFrames += 1;
-  fpsTime += dt;
-  if (fpsTime >= 1) {
-    world.stats.fps = Math.round(fpsFrames / fpsTime);
-    fpsFrames = 0;
-    fpsTime = 0;
-  }
-  const input = world.input;
-
-  if (world.mode === 'menu' && input && input.justPressed) {
-    if (input.justPressed.has('Enter') || input.justPressed.has('Space')) startGame();
-  }
-  if ((world.mode === 'play' || world.mode === 'pause') && input && input.justPressed) {
-    if (input.justPressed.has('KeyP') || input.justPressed.has('Escape')) togglePause();
-  }
-  if ((world.mode === 'over' || world.mode === 'busted') && input && input.justPressed) {
-    if (input.justPressed.has('Enter')) startGame();
-  }
-
-  if (world.mode === 'play') {
-    world.elapsed += dt;
-    world.stats.seconds += dt;
-    world.stats.frames += 1;
-    for (const name of STEP_ORDER) updateSystem(name, dt);
-    updateSystem('save', dt);
-    updateSystem('audio', dt);
-    updateSystem('hud', dt);
-    updateSystem('shots', dt);
-  } else if (world.mode === 'menu') {
-    updateSystem('city', dt);
-    updateSystem('daynight', dt);
-    updateSystem('weather', dt);
-    updateSystem('hud', dt);
-    updateSystem('shots', dt);
-    if (world.camera && world.player && world.player.position) {
-      const t = world.elapsed;
-      world.elapsed += dt;
-      const cx = Math.sin(t * 0.05) * 180;
-      const cz = Math.cos(t * 0.05) * 180;
-      if (world.camera.position && world.camera.position.set) world.camera.position.set(cx, 90, cz);
-      if (world.camera.lookAt) world.camera.lookAt(0, 10, 0);
-    }
-  } else if (world.mode === 'pause') {
-    updateSystem('hud', dt);
-  } else if (world.mode === 'over' || world.mode === 'busted') {
-    updateSystem('hud', dt);
-    showMenu(world.mode === 'busted' ? 'BUSTED' : 'WASTED',
-      world.mode === 'busted'
-        ? 'The Solmar PD caught up with Rico. $200 bail, back on the streets.'
-        : 'Rico is down. The city keeps moving without him.');
-  }
-
-  renderFrame();
-  if (input && typeof input.update === 'function') input.update();
 }
 
-if (startButton) startButton.addEventListener('click', startGame);
-window.addEventListener('resize', () => {
-  if (renderHandle && typeof renderHandle.resize === 'function') {
-    try { renderHandle.resize(); } catch (error) { console.warn('Resize failed:', error); }
-  }
+boot().catch((err) => {
+  console.error('[boot] failed', err);
+  const status = document.getElementById('status');
+  if (status) status.textContent = 'Solmar City failed to start: ' + (err && err.message);
 });
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && world.mode === 'play') togglePause();
-});
-window.addEventListener('beforeunload', () => {
-  const save = world.systems.save;
-  if (save && typeof save.save === 'function') {
-    try { save.save(); } catch (error) { /* storage may be unavailable */ }
-  }
-});
-
-if (shotParam) {
-  // Staged captures skip the menu and play at once.
-  hideMenu();
-  world.mode = 'play';
-  const audio = world.systems.audio;
-  if (audio && typeof audio.resume === 'function') {
-    try { audio.resume(); } catch (error) { /* audio needs a gesture; shots run silent */ }
-  }
-} else {
-  showMenu('SOLMAR CITY', 'Rico Vega owes Madame Coral $5,000. Drive, fight and hustle your way out — and settle the score with the Dourado cartel.');
-}
-
-requestAnimationFrame(frame);

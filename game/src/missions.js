@@ -1,329 +1,392 @@
+// missions.js — Solmar City mission runner + Missions 1-4 (intro jobs).
+// The runner owns the active mission, stage advancement, floating beacon
+// markers, timers, rewards and the onComplete hook. Arc files (missions3
+// through missions11) only export plain mission definitions; the runner
+// (or the bootstrap, via registerMissionDefs) collects them.
+// Wiring contract: world.systems is an array, world.player keeps its
+// .position vector, and the runner never overwrites world state fields.
 import * as THREE from 'three';
+import { getDefs as getDouradoDefs } from './missions3.js';
+import { getDefs as getHarborDefs } from './missions4.js';
+import { getDefs as getAirportDefs } from './missions5.js';
+import { getDefs as getCasinoDefs } from './missions6.js';
 
-// Missions 1-8: Rico's opening jobs and the first Dourado arc.
-// Factory: createMissions(world) -> { startMission(id), update(dt) }.
-// Mission state lives on world.mission; finished ids go to
-// world.completedMissions; rewards land in world.player.cash.
+// ---------------------------------------------------------------- helpers
+export function playerXZ(world) {
+  const p = world && world.player;
+  if (p && p.position) return { x: p.position.x || 0, z: p.position.z || 0 };
+  if (p && typeof p.x === 'number') return { x: p.x, z: p.z || 0 };
+  return { x: 0, z: 0 };
+}
 
-const CORAL_CLUB = { x: 58, z: 29 };
-const YACHT = { x: 295, z: 168 };
-const SAFEHOUSE = { x: -174, z: 232 };
-const ANCHOR_BAR = { x: 100, z: 60 };
-
-function dist2D(a, b) {
-  const dx = a.x - b.x;
-  const dz = a.z - b.z;
+export function distXZ(a, b) {
+  const dx = (a.x || 0) - (b.x || 0);
+  const dz = (a.z || 0) - (b.z || 0);
   return Math.sqrt(dx * dx + dz * dz);
 }
 
-function nearPlayer(world, pos, radius) {
-  if (!world.player || !world.player.position) return false;
-  return dist2D(world.player.position, pos) <= radius;
+function toast(world, text) {
+  if (!world) return;
+  if (typeof world.showToast === 'function') { world.showToast(text); return; }
+  if (typeof world.toast === 'function') { world.toast(text); return; }
+  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
+  if (world.hud && typeof world.hud.toast === 'function') world.hud.toast(text);
 }
 
-function inVehicle(world) {
-  if (!world.player) return false;
-  return !!(world.player.currentCar || world.player.currentBike || world.player.car);
+function inVehicle(world, kinds) {
+  const p = world && world.player;
+  if (!p) return false;
+  if (kinds.includes('car') && (p.car || p.currentCar)) return true;
+  if (kinds.includes('boat') && (p.boat || p.currentBoat)) return true;
+  if (kinds.includes('plane') && (p.seaplane || p.currentPlane || p.plane)) return true;
+  if (kinds.includes('heli') && (p.helicopter || p.currentHeli || p.heli)) return true;
+  if (kinds.includes('bike') && (p.bike || p.currentBike)) return true;
+  if (kinds.includes('jetski') && (p.jetski || p.currentJetski)) return true;
+  if (typeof p.currentVehicle === 'function') {
+    const v = p.currentVehicle();
+    if (v && kinds.includes(v.kind)) return true;
+  }
+  return false;
 }
 
-export function createMissions(world) {
-  let marker = null;
-  let enemies = [];
-  let defeated = 0;
-  let stageData = {};
+// ------------------------------------------------------- Missions 1-4
+export const INTRO_DEFS = [
+  {
+    id: 1, title: 'First Wheels', reward: 500, arc: 'intro',
+    briefing: 'Rico needs wheels. Steal a car and bring it to the Coral Club.',
+    stages: [
+      { kind: 'enterVehicle', vehicle: 'car', objective: 'Steal a car (press E near one)' },
+      { kind: 'reach', at: { x: 58, z: 29 }, radius: 8, objective: 'Drive to the Coral Club' },
+    ],
+    onComplete(world) { world.introState = world.introState || {}; world.introState.firstWheels = true; },
+  },
+  {
+    id: 2, title: 'Package Run', reward: 800, arc: 'intro',
+    briefing: 'Three packages, 150 seconds. The Coral crew is counting on you.',
+    stages: [
+      { kind: 'reach', at: { x: 58, z: 116 }, radius: 7, timeLimit: 150, objective: 'Deliver package 1/3 to the shop' },
+      { kind: 'reach', at: { x: -174, z: 232 }, radius: 7, timeLimit: 150, objective: 'Deliver package 2/3 to the safehouse' },
+      { kind: 'reach', at: { x: 100, z: 60 }, radius: 7, timeLimit: 150, objective: 'Deliver package 3/3 to the Anchor Bar' },
+    ],
+    onComplete(world) { world.introState = world.introState || {}; world.introState.packagesDone = true; },
+  },
+  {
+    id: 3, title: 'Heat Wave', reward: 1200, arc: 'intro',
+    briefing: 'The cops are on you. Survive a 3-star wanted level for 60 seconds.',
+    stages: [
+      { kind: 'survive', wanted: 3, duration: 60, objective: 'Survive 3 stars for 60 seconds' },
+    ],
+    onComplete(world) { world.introState = world.introState || {}; world.introState.heatSurvived = true; },
+  },
+  {
+    id: 4, title: 'Yacht Escape', reward: 2500, arc: 'intro',
+    briefing: 'Pick up two crew at the Anchor Bar, reach the yacht, then vanish.',
+    stages: [
+      { kind: 'escort', at: { x: 100, z: 60 }, radius: 8, crewNeeded: 2, objective: 'Pick up 2 crew at the Anchor Bar' },
+      { kind: 'reach', at: { x: 305, z: 175 }, radius: 9, objective: 'Reach the yacht at the marina' },
+      { kind: 'reach', at: { x: -174, z: 232 }, radius: 8, objective: 'Escape to the safehouse' },
+    ],
+    onComplete(world) { world.introState = world.introState || {}; world.introState.yachtEscape = true; },
+  },
+];
+
+// ------------------------------------------------------------- the runner
+// The bootstrap's wire() calls factories as (scene, world) first, so the
+// runner accepts both shapes: createMissionSystem(world) and
+// createMissionSystem(scene, world). Without this the runner binds the
+// wrong object and M1-20 can never run.
+export function createMissionSystem(sceneOrWorld, maybeWorld) {
+  const world = maybeWorld || sceneOrWorld;
+  const defs = new Map();
+  for (const d of INTRO_DEFS) defs.set(d.id, d);
+
+  const state = {
+    active: null, // { def, stageIndex, stageState, timeLeft }
+    completed: [],
+    marker: null, // THREE group for the floating beacon
+    markerPos: null,
+  };
+
+  function allDefs() { return [...defs.values()].sort((a, b) => a.id - b.id); }
+
+  function registerMissionDefs(list) {
+    for (const d of list || []) {
+      if (d && typeof d.id === 'number' && !defs.has(d.id)) defs.set(d.id, d);
+    }
+  }
+
+  // Register the M1-20 arcs owned by this slice.
+  registerMissionDefs(getDouradoDefs());
+  registerMissionDefs(getHarborDefs());
+  registerMissionDefs(getAirportDefs());
+  registerMissionDefs(getCasinoDefs());
 
   function clearMarker() {
-    if (marker && world.scene) world.scene.remove(marker);
-    marker = null;
-  }
-
-  function clearEnemies() {
-    for (const e of enemies) {
-      if (e.mesh && world.scene) world.scene.remove(e.mesh);
+    if (state.marker && world.scene && typeof world.scene.remove === 'function') {
+      world.scene.remove(state.marker);
     }
-    enemies = [];
-    defeated = 0;
+    state.marker = null;
+    state.markerPos = null;
+    if (world.mission) world.mission.marker = null;
   }
 
-  // Small shared marker helper: floating beacon (cylinder + light beam).
-  function makeMarker(pos) {
+  function showMarker(at) {
     clearMarker();
-    const group = new THREE.Group();
-    const ring = new THREE.Mesh(
-      new THREE.CylinderGeometry(3, 3, 0.4, 24),
-      new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.55 })
-    );
-    ring.position.y = 0.2;
-    const beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.7, 0.7, 36, 12, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xffd23f, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
-    );
-    beam.position.y = 18;
-    group.add(ring);
-    group.add(beam);
-    group.position.set(pos.x, 0, pos.z);
-    if (world.scene) world.scene.add(group);
-    marker = group;
-    return group;
+    state.markerPos = { x: at.x, z: at.z };
+    if (world.mission) world.mission.marker = { x: at.x, z: at.z };
+    if (!world.scene || typeof THREE === 'undefined') return;
+    try {
+      const group = new THREE.Group();
+      const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.4, 1.4, 0.5, 20),
+        new THREE.MeshBasicMaterial({ color: 0xffc233, transparent: true, opacity: 0.85 }),
+      );
+      base.position.y = 0.3;
+      const beam = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.55, 0.55, 42, 12, 1, true),
+        new THREE.MeshBasicMaterial({ color: 0xffc233, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false }),
+      );
+      beam.position.y = 21;
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(2.2, 0.14, 8, 28),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 1.1;
+      group.add(base, beam, ring);
+      group.position.set(at.x, 0, at.z);
+      group.userData.isMissionMarker = true;
+      world.scene.add(group);
+      state.marker = group;
+    } catch (err) { state.marker = null; }
   }
 
-  function setObjective(text, markerPos) {
-    if (!world.mission) world.mission = {};
-    world.mission.objective = text;
-    world.mission.marker = markerPos ? new THREE.Vector3(markerPos.x, 0, markerPos.z) : null;
-    if (markerPos) makeMarker(markerPos);
-    else clearMarker();
+  function syncHud() {
+    const a = state.active;
+    if (!a) { if (world.mission) world.mission = { id: 0, stage: 0, objective: '', marker: null, timer: 0 }; return; }
+    const stage = a.def.stages[a.stageIndex];
+    world.mission = world.mission || {};
+    world.mission.id = a.def.id;
+    world.mission.title = a.def.title;
+    world.mission.stage = a.stageIndex;
+    world.mission.stageCount = a.def.stages.length;
+    world.mission.objective = stage.objective || '';
+    world.mission.timer = a.timeLeft || 0;
+    world.mission.marker = state.markerPos;
   }
 
-  function finish(reward) {
-    const id = world.mission ? world.mission.id : 0;
-    if (world.player) world.player.cash = (world.player.cash || 0) + reward;
-    if (world.completedMissions && !world.completedMissions.includes(id)) {
-      world.completedMissions.push(id);
-    }
-    if (world.events) world.events.push({ type: 'missionComplete', id, reward });
-    clearMarker();
-    clearEnemies();
-    if (world.mission) {
-      world.mission.id = 0;
-      world.mission.stage = 0;
-      world.mission.objective = 'No active mission. Visit a mission marker to start the next job.';
-      world.mission.marker = null;
-      world.mission.timer = 0;
-    }
-    stageData = {};
-  }
-
-  function fail(reason) {
-    clearMarker();
-    clearEnemies();
-    if (world.events) world.events.push({ type: 'missionFailed', id: world.mission ? world.mission.id : 0, reason });
-    if (world.mission) {
-      world.mission.id = 0;
-      world.mission.stage = 0;
-      world.mission.objective = reason + ' Mission failed — try again.';
-      world.mission.marker = null;
-      world.mission.timer = 0;
-    }
-    stageData = {};
-  }
-
-  function spawnEnemies(count, center, spread) {
-    clearEnemies();
-    if (world.systems && world.systems.combat && typeof world.systems.combat.spawnGangSquad === 'function') {
-      try {
-        const squad = world.systems.combat.spawnGangSquad(center, count) || [];
-        enemies = squad.map((m) => ({ mesh: m, pos: m.position || center, hp: 3, dwell: 0 }));
-        return;
-      } catch (err) { /* fall through to simple markers */ }
-    }
+  function spawnStageEnemies(stage) {
+    const count = stage.enemyCount || 0;
+    if (count <= 0) return 0;
+    world.enemies = world.enemies || [];
+    world.gangShooters = world.gangShooters || [];
+    const spawned = [];
     for (let i = 0; i < count; i++) {
-      const g = new THREE.Group();
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.9, 1.7, 0.5),
-        new THREE.MeshStandardMaterial({ color: 0x8a1f1f })
-      );
-      body.position.y = 0.85;
-      const head = new THREE.Mesh(
-        new THREE.SphereGeometry(0.28, 10, 8),
-        new THREE.MeshStandardMaterial({ color: 0xd9a066 })
-      );
-      head.position.y = 1.95;
-      g.add(body);
-      g.add(head);
-      const px = center.x + (world.rng ? (world.rng() - 0.5) * spread : (i - count / 2) * 4);
-      const pz = center.z + (world.rng ? (world.rng() - 0.5) * spread : (i % 2) * 5);
-      g.position.set(px, 0, pz);
-      if (world.scene) world.scene.add(g);
-      enemies.push({ mesh: g, pos: g.position, hp: 3, dwell: 0 });
-    }
-  }
-
-  // Close-quarters takedown: stand next to a guard briefly to beat him
-  // down. Also honours combat kill events if the combat system reports them.
-  function updateEnemies(dt, onAllDown) {
-    if (!enemies.length) return;
-    for (const e of enemies) {
-      if (e.hp <= 0) continue;
-      const d = world.player && world.player.position ? dist2D(world.player.position, e.pos) : 999;
-      if (d < 4) {
-        e.dwell += dt;
-        if (e.dwell > 1.2) {
-          e.hp = 0;
-          defeated += 1;
-          if (e.mesh && world.scene) world.scene.remove(e.mesh);
-          if (world.events) world.events.push({ type: 'enemyDown' });
-        }
+      if (typeof world.spawnShooter === 'function') {
+        const s = world.spawnShooter(stage.at || { x: 0, z: 0 }, stage.enemyHealth || 60);
+        if (s) spawned.push(s);
       } else {
-        e.dwell = 0;
-      }
-      // Guards shuffle toward Rico when he is close.
-      if (d < 30 && d > 3 && e.mesh) {
-        const dx = world.player.position.x - e.pos.x;
-        const dz = world.player.position.z - e.pos.z;
-        const len = Math.sqrt(dx * dx + dz * dz) || 1;
-        e.pos.x += (dx / len) * dt * 2.2;
-        e.pos.z += (dz / len) * dt * 2.2;
+        const angle = (i / count) * Math.PI * 2;
+        const foe = {
+          kind: 'shooter', health: stage.enemyHealth || 60, maxHealth: stage.enemyHealth || 60,
+          position: { x: (stage.at?.x || 0) + Math.cos(angle) * 6, z: (stage.at?.z || 0) + Math.sin(angle) * 6 },
+          alive: true,
+        };
+        world.enemies.push(foe);
+        world.gangShooters.push(foe);
+        spawned.push(foe);
       }
     }
-    if (defeated >= enemies.length && enemies.length > 0) onAllDown();
+    return spawned.length;
   }
 
-  function startMission(id) {
-    if (!world.mission) world.mission = {};
-    clearMarker();
-    clearEnemies();
-    stageData = {};
-    world.mission.id = id;
-    world.mission.stage = 0;
-    world.mission.timer = 0;
-    if (world.systems && world.systems.combat && typeof world.systems.combat.refillAmmo === 'function') {
-      try { world.systems.combat.refillAmmo(); } catch (err) { /* ammo refill is optional */ }
+  function enterStage(index) {
+    const a = state.active;
+    const stage = a.def.stages[index];
+    // Declare kind BEFORE reading it anywhere (TDZ guard, v10 M39 lesson).
+    const kind = stage.kind || 'reach';
+    a.stageIndex = index;
+    a.stageState = { spawned: 0, spawnedIds: [], waited: 0, tailT: 0 };
+    // Mission-wide timer comes ONLY from timeLimit. A stage's `duration`
+    // is its own completion clock (survive / defend / wait count it down
+    // themselves); using it as the abort timer too aborts survive and
+    // defend stages on the exact tick they would complete (M3, M12).
+    a.timeLeft = stage.timeLimit || 0;
+    if (stage.at) showMarker(stage.at);
+    else if (kind === 'survive' || kind === 'defend') clearMarker();
+    else clearMarker();
+    if (kind === 'survive' && typeof stage.wanted === 'number') {
+      world.wanted = Math.max(world.wanted || 0, stage.wanted);
     }
-    switch (id) {
-      case 1:
-        setObjective('Steal a car (press E near one), then drive to the Coral Club.', CORAL_CLUB);
-        break;
-      case 2:
-        stageData.stops = [{ x: 58, z: 116 }, { x: -58, z: -58 }, { x: 116, z: 174 }];
-        stageData.stopIndex = 0;
-        world.mission.timer = 150;
-        setObjective('Deliver package 1 of 3 — 150 seconds on the clock.', stageData.stops[0]);
-        break;
-      case 3:
-        world.wanted = 3;
-        world.mission.timer = 60;
-        setObjective('Survive a 3-star wanted level for 60 seconds. Keep moving!', null);
-        break;
-      case 4:
-        stageData.crew = [{ x: SAFEHOUSE.x, z: SAFEHOUSE.z, got: false }, { x: ANCHOR_BAR.x, z: ANCHOR_BAR.z, got: false }];
-        stageData.picked = 0;
-        setObjective('Pick up your crew: first at the safehouse.', stageData.crew[0]);
-        break;
-      case 5:
-        setObjective('Dourado job: pick up the crew at the Anchor Bar, then drive to the Coral Club.', ANCHOR_BAR);
-        break;
-      case 6:
-        stageData.stops = [{ x: -116, z: 58 }, { x: 174, z: -116 }];
-        stageData.stopIndex = 0;
-        world.mission.timer = 120;
-        setObjective('Dourado delivery: drop 1 of 2 — 120 seconds.', stageData.stops[0]);
-        break;
-      case 7:
-        spawnEnemies(3, { x: -170, z: -200 }, 18);
-        setObjective('Dourado ambush: take down all 3 guards at the freight yard.', { x: -170, z: -200 });
-        break;
-      case 8:
-        spawnEnemies(2, CORAL_CLUB, 12);
-        setObjective('Finale: clear the Coral Club entrance, then reach the penthouse marker.', CORAL_CLUB);
-        break;
-      default:
-        return false;
+    if (kind === 'fight' || kind === 'defend') {
+      a.stageState.spawned = spawnStageEnemies(stage);
     }
+    if (kind === 'tail' && stage.path && stage.path.length) {
+      a.stageState.tailTarget = { ...stage.path[0] };
+      a.stageState.tailWp = 0;
+      showMarker(stage.path[0]);
+    }
+    syncHud();
+  }
+
+  function start(id) {
+    const def = defs.get(id);
+    if (!def) return false;
+    if (state.active) return false;
+    if (state.completed.includes(id)) return false;
+    if (def.requires && !state.completed.includes(def.requires)) return false;
+    state.active = { def, stageIndex: 0, stageState: {}, timeLeft: 0 };
+    toast(world, `Mission ${def.id}: ${def.title} — ${def.briefing}`);
+    if (typeof world.onMissionStart === 'function') world.onMissionStart(def);
+    enterStage(0);
     return true;
   }
 
-  function update(dt) {
-    if (!world.mission || !world.mission.id) return;
-    const id = world.mission.id;
-    if (id < 1 || id > 8) return;
-    if (world.mission.timer > 0) {
-      world.mission.timer -= dt;
-      if (world.mission.timer <= 0) {
-        if (id === 2 || id === 6) { fail('Out of time.'); return; }
-      }
-    }
-    if (marker) marker.rotation.y += dt * 1.5;
-
-    switch (id) {
-      case 1: {
-        if (world.mission.stage === 0 && inVehicle(world)) {
-          world.mission.stage = 1;
-          setObjective('Drive to the Coral Club marker.', CORAL_CLUB);
-        }
-        if (world.mission.stage === 1 && inVehicle(world) && nearPlayer(world, CORAL_CLUB, 9)) {
-          finish(500);
-        }
-        break;
-      }
-      case 2: {
-        const stop = stageData.stops[stageData.stopIndex];
-        if (stop && nearPlayer(world, stop, 8)) {
-          stageData.stopIndex += 1;
-          if (stageData.stopIndex >= stageData.stops.length) finish(800);
-          else setObjective(`Deliver package ${stageData.stopIndex + 1} of 3.`, stageData.stops[stageData.stopIndex]);
-        }
-        break;
-      }
-      case 3: {
-        if (world.mode === 'busted') { fail('Busted by the police.'); break; }
-        if (world.mission.timer <= 0) {
-          world.wanted = 0;
-          finish(1200);
-        }
-        break;
-      }
-      case 4: {
-        if (world.mission.stage === 0) {
-          const next = stageData.crew.find((c) => !c.got);
-          if (next && nearPlayer(world, next, 7)) {
-            next.got = true;
-            stageData.picked += 1;
-            if (stageData.picked >= 2) {
-              world.mission.stage = 1;
-              setObjective('Crew aboard! Drive the yacht at the marina.', YACHT);
-            } else {
-              const other = stageData.crew.find((c) => !c.got);
-              setObjective('One more crew member to pick up.', other);
-            }
-          }
-        } else if (world.mission.stage === 1) {
-          if (nearPlayer(world, YACHT, 10)) {
-            world.mission.stage = 2;
-            setObjective('Escape! Lose the heat — get to the boardwalk.', { x: 0, z: 264 });
-          }
-        } else if (nearPlayer(world, { x: 0, z: 264 }, 10)) {
-          finish(2500);
-        }
-        break;
-      }
-      case 5: {
-        if (world.mission.stage === 0 && nearPlayer(world, ANCHOR_BAR, 7)) {
-          world.mission.stage = 1;
-          setObjective('Crew picked up. Drive to the Coral Club.', CORAL_CLUB);
-        } else if (world.mission.stage === 1 && nearPlayer(world, CORAL_CLUB, 9)) {
-          finish(2000);
-        }
-        break;
-      }
-      case 6: {
-        const stop = stageData.stops[stageData.stopIndex];
-        if (stop && nearPlayer(world, stop, 8)) {
-          stageData.stopIndex += 1;
-          if (stageData.stopIndex >= stageData.stops.length) finish(3000);
-          else setObjective('Dourado delivery: drop 2 of 2.', stageData.stops[stageData.stopIndex]);
-        }
-        break;
-      }
-      case 7: {
-        updateEnemies(dt, () => finish(4000));
-        break;
-      }
-      case 8: {
-        if (world.mission.stage === 0) {
-          updateEnemies(dt, () => {
-            world.mission.stage = 1;
-            setObjective('Entrance clear. Reach the penthouse marker at the Coral Club.', { x: 29, z: 29 });
-          });
-        } else if (nearPlayer(world, { x: 29, z: 29 }, 8)) {
-          finish(5000);
-        }
-        break;
-      }
-      default:
-        break;
-    }
+  function advanceStage() {
+    const a = state.active;
+    if (!a) return;
+    if (a.stageIndex + 1 >= a.def.stages.length) { completeMission(); return; }
+    enterStage(a.stageIndex + 1);
   }
 
-  return { startMission, update };
+  function completeMission() {
+    const a = state.active;
+    if (!a) return;
+    const def = a.def;
+    world.cash = (world.cash || 0) + (def.reward || 0);
+    state.completed.push(def.id);
+    world.completedMissions = world.completedMissions || [];
+    if (!world.completedMissions.includes(def.id)) world.completedMissions.push(def.id);
+    clearMarker();
+    state.active = null;
+    syncHud();
+    toast(world, `Mission complete: ${def.title} — $${def.reward}`);
+    if (typeof world.onMissionComplete === 'function') world.onMissionComplete(def);
+    // The runner MUST call onComplete: arc flags live inside it.
+    if (typeof def.onComplete === 'function') def.onComplete(world);
+  }
+
+  function abort(reason) {
+    if (!state.active) return;
+    const title = state.active.def.title;
+    state.active = null;
+    clearMarker();
+    syncHud();
+    toast(world, `Mission failed: ${title}${reason ? ' — ' + reason : ''}`);
+  }
+
+  function aliveEnemies(stageState) {
+    const list = world.enemies || [];
+    return list.filter((e) => e && (e.health === undefined || e.health > 0) && e.alive !== false);
+  }
+
+  function update(dt) {
+    const a = state.active;
+    if (!a) return;
+    if (world.mode && world.mode !== 'play') return;
+    const stage = a.def.stages[a.stageIndex];
+    // Declare kind BEFORE reading it anywhere (TDZ guard).
+    const kind = stage.kind || 'reach';
+    const pos = playerXZ(world);
+
+    // Mission-wide timer.
+    if (a.timeLeft > 0) {
+      a.timeLeft -= dt;
+      if (a.timeLeft <= 0) { abort('Time ran out'); return; }
+    }
+    // Stage max-wanted gate (stealth stages): fail loudly, never silently.
+    if (typeof stage.maxWanted === 'number' && (world.wanted || 0) > stage.maxWanted) {
+      abort('Spotted — wanted level too high'); return;
+    }
+    // Marker beacon pulse.
+    if (state.marker) {
+      state.marker.rotation.y += dt * 0.8;
+      state.marker.position.y = Math.sin((world.elapsed || 0) * 2) * 0.25;
+    }
+
+    if (kind === 'reach' || kind === 'deliver' || kind === 'collect') {
+      if (stage.at && distXZ(pos, stage.at) <= (stage.radius || 9)) advanceStage();
+    } else if (kind === 'enterVehicle') {
+      if (inVehicle(world, [stage.vehicle || 'car'])) advanceStage();
+    } else if (kind === 'drive') {
+      if (stage.at && inVehicle(world, ['car', 'bike']) && distXZ(pos, stage.at) <= (stage.radius || 9)) advanceStage();
+    } else if (kind === 'boat') {
+      if (stage.at && inVehicle(world, ['boat', 'jetski']) && distXZ(pos, stage.at) <= (stage.radius || 9)) advanceStage();
+    } else if (kind === 'fly') {
+      const airborne = inVehicle(world, ['plane', 'heli']);
+      if (stage.at && airborne && distXZ(pos, stage.at) <= (stage.radius || 12)) advanceStage();
+    } else if (kind === 'survive') {
+      if ((world.wanted || 0) >= (stage.wanted || 1)) {
+        a.stageState.waited += dt;
+        if (a.stageState.waited >= (stage.duration || 30)) advanceStage();
+      }
+    } else if (kind === 'defend') {
+      a.stageState.waited += dt;
+      const alive = aliveEnemies(a.stageState);
+      if (a.stageState.spawned > 0 && alive.length === 0 && a.stageState.waited >= (stage.duration || 30)) advanceStage();
+      else if (a.stageState.spawned === 0 && a.stageState.waited >= (stage.duration || 30)) advanceStage();
+    } else if (kind === 'fight') {
+      // Never auto-advance on an empty list that was never populated.
+      if (a.stageState.spawned === 0) {
+        a.stageState.spawned = spawnStageEnemies(stage);
+        if (a.stageState.spawned === 0) return;
+      }
+      if (aliveEnemies(a.stageState).length === 0) advanceStage();
+    } else if (kind === 'escort') {
+      // Reaching the pickup point recruits the crew on the spot, so the
+      // stage can complete even before any crew system has hired anyone.
+      if (stage.at && distXZ(pos, stage.at) <= (stage.radius || 9)) {
+        if (Array.isArray(world.crew)) {
+          while (world.crew.filter((c) => c && c.state !== 'down').length < (stage.crewNeeded || 1)) {
+            world.crew.push({ name: 'Crew', health: 100, state: 'follow', weapon: 'pistol' });
+          }
+        }
+        advanceStage();
+      }
+    } else if (kind === 'tail') {
+      const path = stage.path || [];
+      const st = a.stageState;
+      if (path.length) {
+        const target = path[Math.min(st.tailWp, path.length - 1)];
+        st.tailTarget = target;
+        showMarkerThrottled(target);
+        const d = distXZ(pos, target);
+        if (d > (stage.loseDistance || 60)) { abort('Lost the target'); return; }
+        if (d < (stage.spottedDistance || 12)) { abort('Spotted by the target'); return; }
+        if (st.tailWp < path.length - 1) {
+          st.tailT += dt;
+          if (st.tailT > (stage.wpTime || 12)) { st.tailWp++; st.tailT = 0; }
+        } else if (d <= (stage.finishDistance || 25)) advanceStage();
+      }
+    } else if (kind === 'wait') {
+      a.stageState.waited += dt;
+      if (a.stageState.waited >= (stage.duration || 10)) advanceStage();
+    }
+    syncHud();
+  }
+
+  let markerThrottle = 0;
+  function showMarkerThrottled(at) {
+    markerThrottle += 1;
+    if (markerThrottle % 30 === 1) showMarker(at);
+  }
+
+  function available() {
+    return allDefs().filter((d) => !state.completed.includes(d.id) && (!d.requires || state.completed.includes(d.requires)));
+  }
+
+  const api = {
+    defs, state, registerMissionDefs, start, update, abort, advanceStage,
+    completeMission, available, allDefs,
+    get active() { return state.active; },
+    get completed() { return state.completed; },
+    nextMission() { const n = available()[0]; return n ? n.id : null; },
+    startNext() { const n = available()[0]; return n ? start(n.id) : false; },
+  };
+  if (Array.isArray(world.systems)) world.systems.push(api);
+  return api;
 }
+
+export function getDefs() { return [...INTRO_DEFS]; }
+
+export default createMissionSystem;
