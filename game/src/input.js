@@ -17,8 +17,12 @@ const GAME_KEYS = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'ShiftLeft', 'ShiftRight', 'Space',
-  'KeyE', 'KeyF', 'Digit1', 'Digit2', 'Digit3', 'Digit4',
+  'KeyE', 'KeyF', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
   'KeyQ', 'KeyR', 'KeyC',
+  // v3: KeyT starts a street race at a start gantry (activities.js),
+  // KeyN skips the day/night clock to dawn or dusk (daynight.js),
+  // KeyB buys a NOS refill and KeyV an armour vest at the shop.
+  'KeyT', 'KeyN', 'KeyB', 'KeyV',
   'KeyM', 'KeyP', 'Escape', 'Enter',
 ]);
 const PAUSE_KEYS = new Set(['KeyP', 'Escape']);
@@ -40,6 +44,15 @@ export function createInput(canvas) {
       input.clicked = false;
       return was;
     },
+    /**
+     * v3 — edge detection for ordinary keys: true only on the frame the
+     * key went down, so systems that poll (races on T, time-skip on N)
+     * can use this instead of keeping their own prev-key state.
+     * update() snapshots the held set each frame for this.
+     */
+    pressed(code) {
+      return input.keys.has(code) && !prevKeys.has(code);
+    },
     /** One-shot presses since the last call, as ACTION_* flags. */
     takeActions() {
       const taken = actions;
@@ -50,6 +63,9 @@ export function createInput(canvas) {
     update() {
       input.mouseDX = 0;
       input.mouseDY = 0;
+      // Snapshot the held keys AFTER the frame read them, so pressed()
+      // above can tell a fresh press from a held key next frame.
+      prevKeys = new Set(input.keys);
     },
     /** Convenience: is any of these codes held? */
     any(...codes) {
@@ -62,6 +78,9 @@ export function createInput(canvas) {
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
+  // v3: the held-key set as of the last update() — pressed() diffs
+  // against it. Seeded empty so the first frame never reports a press.
+  let prevKeys = new Set();
 
   window.addEventListener('keydown', (event) => {
     if (!GAME_KEYS.has(event.code)) return;

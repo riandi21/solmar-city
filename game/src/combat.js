@@ -1,11 +1,12 @@
-// Combat for Solmar City — fists, pistol, SMG, shotgun, and the rival
+// Combat for Solmar City — fists, pistol, SMG, shotgun, rifle, and the rival
 // gang shooters who show up for the Marina Job (mission 4) and the
-// arc-2 squad fights (missions 5 and 8).
+// arc-2 squad fights (missions 5 and 8) and the Harbor War (mission 12).
 //
-// Controls: keys 1 / 2 / 3 / 4 switch fists / pistol / SMG / shotgun,
-// F punches, left mouse click shoots while a gun is armed. The SMG fires
-// a 3-round burst per click; the shotgun fires 5 pellets with a slow
-// cooldown. Ammo is kept per weapon (pistol 24, SMG 90, shotgun 12) and
+// Controls: keys 1 / 2 / 3 / 4 / 5 switch fists / pistol / SMG / shotgun /
+// rifle, F punches, left mouse click shoots while a gun is armed. The SMG
+// fires a 3-round burst per click; the shotgun fires 5 pellets with a slow
+// cooldown; the rifle fires one heavy long-range round with a slow bolt.
+// Ammo is kept per weapon (pistol 24, SMG 90, shotgun 12, rifle 30) and
 // refilled at the start of every mission; world.player.ammo always
 // mirrors the CURRENT weapon's ammo (0 for fists).
 //
@@ -35,6 +36,12 @@ export const SHOTGUN_DAMAGE = 10; // per pellet
 export const SHOTGUN_RANGE = 25;
 export const SHOTGUN_PELLETS = 5;
 export const SHOTGUN_COOLDOWN = 0.9; // seconds between shotgun blasts
+export const RIFLE_AMMO = 30;
+export const RIFLE_DAMAGE = 40;
+export const RIFLE_RANGE = 120;
+export const RIFLE_COOLDOWN = 1.1; // seconds between rifle shots
+export const ARMOR_ABSORB = 0.5; // share of a hit the vest soaks up
+export const ARMOR_DURABILITY = 100;
 export const PLAYER_MAX_HEALTH = 100;
 export const ENEMY_HEALTH = 50;
 export const PUNCH_RANGE = 2; // metres
@@ -45,12 +52,16 @@ export const REGEN_DELAY = 10; // seconds without being hit before regen
 export const REGEN_RATE = 5; // health per second
 
 // Full magazine per gun; the shop and the mission-start refill use these.
-const WEAPON_AMMO = { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO };
+const WEAPON_AMMO = { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO, rifle: RIFLE_AMMO };
 // Per-weapon firing behaviour. The pistol keeps its v1 numbers exactly.
+// The rifle is the long-range option: a tight cone, one heavy round,
+// and a slow bolt between shots — it reaches across the pier, but it
+// punishes a miss.
 const WEAPON_STATS = {
   pistol: { damage: SHOT_DAMAGE, range: SHOT_RANGE, cone: 0.18, pellets: 1, knockback: 0 },
   smg: { damage: SMG_DAMAGE, range: SMG_RANGE, cone: 0.3, pellets: 1, knockback: 0 },
   shotgun: { damage: SHOTGUN_DAMAGE, range: SHOTGUN_RANGE, cone: 0.38, pellets: SHOTGUN_PELLETS, knockback: 4 },
+  rifle: { damage: RIFLE_DAMAGE, range: RIFLE_RANGE, cone: 0.06, pellets: 1, knockback: 2 },
 };
 const SMG_BURST_ROUNDS = 3;
 const SMG_BURST_GAP = 0.06; // seconds (60 ms) between burst rounds
@@ -99,20 +110,24 @@ function makeShooterMesh() {
 
 export function createCombat(scene, world) {
   const state = {
-    weapon: 'fists', // 'fists' | 'pistol' | 'smg' | 'shotgun'
+    weapon: 'fists', // 'fists' | 'pistol' | 'smg' | 'shotgun' | 'rifle'
     ammo: 0, // the CURRENT weapon's ammo; fists carry none
-    ammoByWeapon: { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO },
+    ammoByWeapon: { pistol: PISTOL_AMMO, smg: SMG_AMMO, shotgun: SHOTGUN_AMMO, rifle: RIFLE_AMMO },
     enemies: [], // { mesh, pos, health, shootTimer, squad, spawnMission }
     enemiesSpawned: false,
     lastMissionId: world.mission ? world.mission.id : 0,
     lastHitAt: -Infinity,
     punchCooldown: 0,
     shotgunCooldown: 0,
+    rifleCooldown: 0,
     burstLeft: 0, // SMG burst rounds still to fire
     burstTimer: 0, // seconds until the next burst round
     tracers: [], // { line, life } — fade out fast
   };
   if (world.player) world.player.ammo = 0;
+  // v3 armour: the shop's vest lives here as durability (100 = fresh).
+  // hurtPlayer() spends it to soak half of every hit until it breaks.
+  if (world.player && world.player.armor === undefined) world.player.armor = 0;
 
   // --- tracers ------------------------------------------------------------
   function addTracer(from, to, color) {
@@ -171,22 +186,35 @@ export function createCombat(scene, world) {
   // Rival-squad API for the arc-2 missions (5 and 8): one shooter at each
   // spot, flagged so the mission can count them. Returns how many spawned.
   // Spots are {x, z} (a THREE.Vector3 works too — only .x/.z are read).
-  function spawnRivalSquad(spots) {
+  // v3 — opts.elite marks the squad as Harbor War veterans (mission 12):
+  // double health, better aim, harder hits. They wear a gold band so the
+  // player can tell them apart at a glance.
+  function spawnRivalSquad(spots, opts) {
     if (!Array.isArray(spots)) return 0;
+    const elite = !!(opts && opts.elite);
     let spawned = 0;
     for (const spot of spots) {
       try {
         if (!spot || typeof spot.x !== 'number' || typeof spot.z !== 'number') continue;
         const mesh = makeShooterMesh();
+        if (elite) {
+          const band = new THREE.Mesh(
+            new THREE.BoxGeometry(0.8, 0.14, 0.46),
+            new THREE.MeshBasicMaterial({ color: 0xffd34d }),
+          );
+          band.position.y = 1.45;
+          mesh.add(band);
+        }
         mesh.position.set(spot.x, 0, spot.z);
         scene.add(mesh);
         state.enemies.push({
           mesh,
           pos: mesh.position,
-          health: ENEMY_HEALTH,
+          health: elite ? ENEMY_HEALTH * 2 : ENEMY_HEALTH,
           shootTimer: 0.8 + Math.random() * 1.2,
           squad: true,
           spawnMission: world.mission ? world.mission.id : 0,
+          elite,
         });
         spawned += 1;
       } catch {
@@ -427,17 +455,52 @@ export function createCombat(scene, world) {
     return true;
   }
 
+  // Rifle: one heavy long-range round, dead straight, with a slow bolt
+  // between shots. The tracer is brighter and longer than the pistol's,
+  // and the shot sound is deeper (audio.rifleShot when it exists).
+  function fireRifleShot() {
+    if (state.rifleCooldown > 0) return false;
+    if ((state.ammoByWeapon.rifle ?? 0) <= 0) {
+      if (world.hud) world.hud.showMessage('Out of ammo — press 1 for fists.');
+      return false;
+    }
+    state.ammoByWeapon.rifle -= 1;
+    syncAmmo();
+    state.rifleCooldown = RIFLE_COOLDOWN;
+    const stats = WEAPON_STATS.rifle;
+    const { from, heading } = aimPoint(stats.range);
+    firePellet(stats, from, heading);
+    if (world.events) world.events.push({ type: 'gunshot' });
+    if (world.audio) {
+      if (typeof world.audio.rifleShot === 'function') world.audio.rifleShot();
+      else world.audio.shot();
+    }
+    return true;
+  }
+
   function shoot() {
     if (world.mode !== 'play') return false;
     if (state.weapon === 'pistol') return fireGunRound('pistol');
     if (state.weapon === 'smg') return startBurst();
     if (state.weapon === 'shotgun') return fireShotgunBlast();
+    if (state.weapon === 'rifle') return fireRifleShot();
     return false; // fists: F punches, clicks do nothing
   }
 
   function hurtPlayer(amount) {
     if (world.mode !== 'play') return;
-    world.player.health -= amount;
+    // v3 armour vest: soaks half the hit and loses that much durability.
+    // A broken vest (0) soaks nothing; the shop sells a fresh one.
+    let taken = amount;
+    if (world.player.armor > 0) {
+      const soaked = amount * ARMOR_ABSORB;
+      world.player.armor = Math.max(0, world.player.armor - soaked);
+      taken = amount - soaked;
+      if (world.player.armor === 0 && world.hud) {
+        world.hud.showMessage('Your armour vest broke!');
+      }
+    }
+    world.player.health -= taken;
     state.lastHitAt = world.time || 0;
     if (world.player.health <= 0) {
       world.player.health = 0;
@@ -458,7 +521,11 @@ export function createCombat(scene, world) {
       const from = new THREE.Vector3(enemy.pos.x, 1.3, enemy.pos.z);
       const to = new THREE.Vector3(world.player.pos.x, 1.2, world.player.pos.z);
       addTracer(from, to, 0xff5544);
-      if (Math.random() < ENEMY_HIT_CHANCE) hurtPlayer(ENEMY_HIT_DAMAGE);
+      // v3 — elites (mission 12) aim better and hit harder than the
+      // regular Dourado shooters: 40% hit chance, 12 damage.
+      const hitChance = enemy.elite ? 0.4 : ENEMY_HIT_CHANCE;
+      const hitDamage = enemy.elite ? 12 : ENEMY_HIT_DAMAGE;
+      if (Math.random() < hitChance) hurtPlayer(hitDamage);
     }
   }
 
@@ -466,6 +533,7 @@ export function createCombat(scene, world) {
     updateTracers(dt);
     if (state.punchCooldown > 0) state.punchCooldown -= dt;
     if (state.shotgunCooldown > 0) state.shotgunCooldown -= dt;
+    if (state.rifleCooldown > 0) state.rifleCooldown -= dt;
     if (world.mode !== 'play') return;
 
     // A new mission refills every gun (missions.js also sets
@@ -514,6 +582,7 @@ export function createCombat(scene, world) {
       if (keys.has('Digit2') || keys.has('Numpad2')) switchWeapon('pistol');
       if (keys.has('Digit3') || keys.has('Numpad3')) switchWeapon('smg');
       if (keys.has('Digit4') || keys.has('Numpad4')) switchWeapon('shotgun');
+      if (keys.has('Digit5') || keys.has('Numpad5')) switchWeapon('rifle');
       // Edge-triggered punch: only fire once per key press, not per frame.
       const fDown = keys.has('KeyF') || keys.has('Keyf');
       if (fDown && !state._fWasDown && onFoot) punch();

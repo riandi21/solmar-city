@@ -201,6 +201,33 @@ async function boot() {
   const shops = buildSystem('shops', shopsModule?.createShops, scene, world);
   if (shops) world.systems.shops = shops;
 
+  // v3: day/night, Old Town + lighthouse, smarter police, the Harbor War
+  // arc, and side activities. Same guarded pattern throughout. The
+  // day/night system gets the renderer's sun + hemisphere light so it
+  // can move them; the render handle itself is published on the world
+  // so daynight can reach setCelestial (moon + stars).
+  if (renderHandle) world.render = renderHandle;
+  const daynightModule = await loadModule('./daynight.js');
+  const daynightLights = renderHandle ? { sun: renderHandle.sun, hemi: renderHandle.hemi } : null;
+  const daynight = buildSystem('daynight', daynightModule?.createDayNight, scene, world, daynightLights);
+  if (daynight) world.systems.daynight = daynight;
+
+  const oldtownModule = await loadModule('./oldtown.js');
+  const oldtown = buildSystem('oldtown', oldtownModule?.createOldTown, scene, world);
+  if (oldtown) world.systems.oldtown = oldtown;
+
+  const policeaiModule = await loadModule('./policeai.js');
+  const policeai = buildSystem('policeai', policeaiModule?.createPoliceAI, scene, world);
+  if (policeai) world.systems.policeai = policeai;
+
+  const missions3Module = await loadModule('./missions3.js');
+  const missions3 = buildSystem('missions3', missions3Module?.createHarborWar, world);
+  if (missions3) world.systems.missions3 = missions3;
+
+  const activitiesModule = await loadModule('./activities.js');
+  const activities = buildSystem('activities', activitiesModule?.createActivities, scene, world);
+  if (activities) world.systems.activities = activities;
+
   const missionsModule = await loadModule('./missions.js');
   const missions = buildSystem('missions', missionsModule?.createMissions, world);
   if (missions) world.systems.missions = missions;
@@ -345,6 +372,50 @@ async function boot() {
       if (el) el.classList.toggle('hidden', key !== name);
     }
     if (hudEls.hud) hudEls.hud.classList.toggle('hidden', name === 'menu');
+    // v3 — the pause screen shows a run summary: cash, missions, the
+    // clock, packages, taxi money and best race times.
+    if (name === 'pause') updatePauseStats();
+  }
+
+  // v3 — one paragraph of run summary for the pause screen, rebuilt
+  // every time the game pauses so it never goes stale.
+  function updatePauseStats() {
+    const statsEl = document.getElementById('pause-stats');
+    if (!statsEl) return;
+    const done = (world.missionsDone || []).length;
+    const progress = world.activitiesProgress || {};
+    const packages = (progress.packagesFound || []).length;
+    const taxi = progress.taxiEarned || 0;
+    const bests = Object.entries(progress.raceBest || {})
+      .map(([id, t]) => `${id} ${Number(t).toFixed(1)}s`)
+      .join(' · ');
+    let clock = '';
+    try {
+      const dn = world.systems && world.systems.daynight;
+      if (dn && typeof dn.clockText === 'function') clock = dn.clockText();
+    } catch {
+      clock = '';
+    }
+    const lines = [
+      `<b>Cash:</b> $${Math.floor(world.cash || 0)}`,
+      `<b>Missions:</b> ${done}/12`,
+    ];
+    if (clock) lines.push(`<b>Time:</b> ${clock}`);
+    lines.push(`<b>Packages:</b> ${packages}/20`);
+    lines.push(`<b>Taxi earned:</b> $${taxi}`);
+    if (bests) lines.push(`<b>Best races:</b> ${bests}`);
+    if (world.player && world.player.armor > 0) {
+      lines.push(`<b>Armour vest:</b> ${Math.round(world.player.armor)}`);
+    }
+    // v3 — run stats from the session tracker.
+    if (world.runStats) {
+      const s = world.runStats;
+      const kmh = Math.round((s.topSpeed || 0) * 3.6);
+      const km = (s.distanceDriven || 0) / 1000;
+      lines.push(`<b>Driven:</b> ${km.toFixed(1)} km · <b>Top speed:</b> ${kmh} km/h`);
+      lines.push(`<b>Cars stolen:</b> ${s.carsStolen || 0} · <b>Shots fired:</b> ${s.shotsFired || 0}`);
+    }
+    statsEl.innerHTML = lines.join('<br>');
   }
   function setMode(mode) {
     world.mode = mode;
@@ -383,6 +454,12 @@ async function boot() {
         cash: world.cash,
         missionsDone: world.missionsDone || [],
         playerPos: [world.player.pos.x, world.player.pos.y, world.player.pos.z],
+        // v3 fields, same shape as save.js writes.
+        version: 3,
+        packagesFound: (world.activitiesProgress && world.activitiesProgress.packagesFound) || [],
+        raceBest: (world.activitiesProgress && world.activitiesProgress.raceBest) || {},
+        taxiEarned: (world.activitiesProgress && world.activitiesProgress.taxiEarned) || 0,
+        armor: world.player.armor || 0,
       }));
     } catch {
       // Storage can be off (private windows): the save then lasts this visit only.
@@ -399,11 +476,84 @@ async function boot() {
       world.player.pos.set(data.playerPos.x, 0, data.playerPos.z);
       if (world.player.mesh) world.player.mesh.position.copy(world.player.pos);
     }
+    // v3 — restore the activity progress and the armour vest. A v1/v2
+    // save has none of these fields; the defaults (no packages, no best
+    // times, no fares, no armour) apply, and the collectible parcels
+    // stay on the street for the player to find again.
+    if (data.packagesFound || data.raceBest || data.taxiEarned) {
+      world.activitiesProgress = world.activitiesProgress || {};
+      if (Array.isArray(data.packagesFound)) world.activitiesProgress.packagesFound = [...data.packagesFound];
+      if (data.raceBest && typeof data.raceBest === 'object') world.activitiesProgress.raceBest = { ...data.raceBest };
+      if (typeof data.taxiEarned === 'number') world.activitiesProgress.taxiEarned = data.taxiEarned;
+      // Collected parcels must not respawn: hide the ones already found.
+      try {
+        const acts = world.systems && world.systems.activities;
+        if (acts && acts.state && Array.isArray(acts.state.packages)) {
+          for (const idx of world.activitiesProgress.packagesFound || []) {
+            const pkg = acts.state.packages[idx];
+            if (pkg && !pkg.found) {
+              pkg.found = true;
+              if (pkg.mesh && world.scene) world.scene.remove(pkg.mesh);
+            }
+          }
+        }
+      } catch {
+        // A stale package mesh is cosmetic; the count is what matters.
+      }
+    }
+    if (typeof data.armor === 'number') world.player.armor = data.armor;
   }
 
   // --- One fixed simulation step ---
   // Same order as shots.js staging, so staged scenes play identically.
-  const stepOrder = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops'];
+  // v3 appends the new systems after the v2 ones: day/night moves the
+  // sun before Old Town spins the lighthouse beam; the police AI runs
+  // after the police it advises; the Harbor War runs after the missions
+  // it extends; activities run last (races, packages, taxi).
+  const stepOrder = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops', 'daynight', 'oldtown', 'policeai', 'missions3', 'activities'];
+
+  // v3 — run stats, kept on the world for the pause screen and the HUD:
+  // distance driven, time on the road, top speed, cars stolen, shots
+  // fired, and crimes committed. Cheap counters, updated once per step
+  // from the values the systems already publish.
+  const runStats = {
+    distanceDriven: 0,
+    timePlayed: 0,
+    topSpeed: 0,
+    carsStolen: 0,
+    shotsFired: 0,
+    crimes: 0,
+    lastPos: null,
+    lastWanted: 0,
+    lastAmmo: null,
+  };
+  world.runStats = runStats;
+  function trackStats(dt) {
+    const player = world.player;
+    if (!player || !player.pos) return;
+    runStats.timePlayed += dt;
+    if (player.car) {
+      if (runStats.lastPos) {
+        const dx = player.pos.x - runStats.lastPos.x;
+        const dz = player.pos.z - runStats.lastPos.z;
+        runStats.distanceDriven += Math.sqrt(dx * dx + dz * dz);
+      }
+      runStats.topSpeed = Math.max(runStats.topSpeed, Math.abs(player.speed || 0));
+    }
+    runStats.lastPos = { x: player.pos.x, z: player.pos.z };
+    if ((world.wanted || 0) > runStats.lastWanted) runStats.crimes += 1;
+    runStats.lastWanted = world.wanted || 0;
+    try {
+      const combat = world.systems && world.systems.combat;
+      const ammo = combat && combat.state ? combat.state.ammo : null;
+      if (typeof ammo === 'number' && runStats.lastAmmo !== null && ammo < runStats.lastAmmo) {
+        runStats.shotsFired += runStats.lastAmmo - ammo;
+      }
+      if (typeof ammo === 'number') runStats.lastAmmo = ammo;
+    } catch {
+      // Combat stats are best-effort.
+    }
+  }
   function stepWorld(dt) {
     for (const name of stepOrder) {
       const system = world.systems[name];
@@ -416,6 +566,13 @@ async function boot() {
         }
       }
     }
+    // v3 — a car that was not there last step is a fresh theft (or a
+    // fresh spawn for a staged scene); count the thefts, not the spawns.
+    if (world.player && world.player.car && !trackStats._hadCar) {
+      runStats.carsStolen += 1;
+    }
+    trackStats._hadCar = !!(world.player && world.player.car);
+    trackStats(dt);
     world.time += dt;
   }
 
@@ -479,8 +636,9 @@ async function boot() {
     if (fromSave) {
       applySave(readSave());
       // Pick up where the debt left off: the next mission not yet done.
+      // v3: twelve missions now — the Harbor War arc (9-12) included.
       const done = world.missionsDone || [];
-      const next = [1, 2, 3, 4, 5, 6, 7, 8].find((id) => !done.includes(id));
+      const next = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].find((id) => !done.includes(id));
       if (next && missions && typeof missions.startMission === 'function') {
         try {
           missions.startMission(next);

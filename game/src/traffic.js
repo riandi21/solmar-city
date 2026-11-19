@@ -5,6 +5,8 @@
 // flee a speeding player car or a gunshot, and go down if the player runs
 // one over (a crime). Cars and peds far from the player are recycled near
 // the player so the counts stay at ~10 cars and ~14 peds.
+// v3: during a street race, traffic inside a 50 m bubble around the racer
+// slows to 5 m/s so it does not cut across the course.
 //
 // Events are read by index (seenEvents) and never removed: police.js reads
 // the same queue for 'crime' events, so no system may drain it.
@@ -367,8 +369,21 @@ export function createTraffic(scene, world, city) {
     processEvents();
     if (world.mode !== undefined && world.mode !== 'play') return;
     const pp = playerPos();
+    // v3 — street races: while a race runs, traffic near the racer
+    // slows to a crawl (5 m/s) instead of cutting across the course.
+    // The course is wherever Rico is racing, so the bubble follows him.
+    let raceBubble = false;
+    try {
+      const acts = world.systems && world.systems.activities;
+      raceBubble = !!(acts && acts.state && acts.state.race);
+    } catch {
+      raceBubble = false;
+    }
     for (const car of [...trafficCars]) {
       stepTrafficCar(car, capped);
+      if (raceBubble && dist2(car.pos.x, car.pos.z, pp.x, pp.z) < 50) {
+        car.speed = Math.min(car.speed, 5);
+      }
       if (dist2(car.pos.x, car.pos.z, pp.x, pp.z) > DESPAWN_CAR) {
         removeTrafficCar(car);
         spawnTrafficCar(true);

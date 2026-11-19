@@ -1,10 +1,20 @@
 // The screenshot scenes behind ?shot=chase|drive|foot|mission. Each one plays the
 // real game forward from a fixed seed for a few seconds, steered by scripted
-// inputs (drive along a road, flee the police, walk a busy street, head for the
-// marina marker), so the frame is what a short game really looks like and the
-// same seed always gives the same frame. Every system call is guarded: if a
-// system is missing the scene still stages with plain positions, and main.js
-// paints the result twice and sets window.__shotReady.
+// inputs (drive along a road, flee the police, race the Old Town Loop, head
+// for a midnight drop), so the frame is what a short game really looks like
+// and the same seed always gives the same frame. Every system call is
+// guarded: if a system is missing the scene still stages with plain
+// positions, and main.js paints the result twice and sets window.__shotReady.
+//
+// v3 staging — every shot shows new content:
+//   chase   — a dusk police chase: 4 stars, the helicopter, and a spike
+//             strip laid across the road ahead.
+//   drive   — the Old Town Loop street race: the start gantry on the
+//             quarter's edge, checkpoint rings, townhouses and cathedral.
+//   foot    — midnight at the lighthouse: Rico on foot on the beach, the
+//             rotating beam sweeping the coast, lamps lit, stars out.
+//   mission — mission 10, Midnight Delivery: four glowing harbour rings
+//             against the night, the clock reading past midnight.
 import * as THREE from 'three';
 
 const STEP = 1 / 60;
@@ -24,10 +34,11 @@ function focusHeading(world) {
   return world.player.heading;
 }
 
-/** Call every system's update once, in world order; a missing system is skipped. */
+/** Call every system's update once, in world order; a missing system is skipped.
+ * The order matches main.js stepOrder, so staged scenes play identically. */
 function stepWorld(world, dt) {
   const systems = world.systems || {};
-  const order = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops'];
+  const order = ['city', 'player', 'vehicles', 'traffic', 'police', 'missions', 'combat', 'helicopter', 'shops', 'daynight', 'oldtown', 'policeai', 'missions3', 'activities'];
   for (const name of order) {
     const system = systems[name];
     if (system && typeof system.update === 'function') {
@@ -128,6 +139,16 @@ function warmUp(world, seconds) {
   for (let i = 0; i < steps; i += 1) stepWorld(world, STEP);
 }
 
+/** Jump the day/night clock when the system exists (guarded: no-op without it). */
+function setClock(world, hours) {
+  try {
+    const dn = world.systems && world.systems.daynight;
+    if (dn && typeof dn.setTime === 'function') dn.setTime(hours);
+  } catch (error) {
+    console.warn('[shots] setTime failed during staging', error);
+  }
+}
+
 /**
  * Set `world` to the named scene and return the screen to draw over it.
  * Unknown names stage the plain drive scene.
@@ -146,8 +167,11 @@ export function stageShot(name, world) {
   warmUp(world, 2);
 
   if (name === 'chase') {
-    // Wanted 4, police closing in AND the helicopter overhead: Rico flees
-    // east along the main road, the heli hanging ahead in frame.
+    // Dusk chase: golden low sun, wanted 4, police closing in AND the
+    // helicopter overhead, with a spike strip laid across the road ahead.
+    // The police AI places the strip itself on the first step after the
+    // heat goes up (its cooldown starts long expired).
+    setClock(world, 17.6);
     putPlayerInCar(world, -180, 0, Math.PI / 2);
     try {
       if (systems.police && typeof systems.police.addWanted === 'function') systems.police.addWanted(4);
@@ -211,64 +235,80 @@ export function stageShot(name, world) {
       console.warn('[shots] helicopter staging failed', error);
     }
   } else if (name === 'foot') {
-    // Shop moment: Rico on foot next to the store at (58,116), facing its
-    // green-cross sign, with the buy prompt on the HUD. Warm-up already ran
-    // at the top of stageShot, so peds and traffic are around.
-    putPlayerOnFoot(world, 58, 121, Math.PI);
-    // A few steps so the shops system sees Rico in range and raises its own
-    // prompt; the explicit setPrompt below is the backup if it has not.
+    // Midnight at the lighthouse: Rico on foot on the south-west beach,
+    // facing the striped tower while its beam sweeps the coast. The
+    // clock is jumped to night first so the lamps, the beam and the
+    // stars are all lit; the warm-up already ran, so peds are around.
+    // Rico stands ~35 m back from the tower so the whole lighthouse
+    // fits the frame instead of filling one corner of it.
+    setClock(world, 23.2);
+    putPlayerOnFoot(world, -242, 278, Math.atan2(-28, 22));
     for (let i = 0; i < 30; i += 1) stepWorld(world, STEP);
-    try {
-      if (world.hud && typeof world.hud.setPrompt === 'function') {
-        world.hud.setPrompt('Q: Health $150 · R: Ammo $100');
-      }
-    } catch (error) {
-      console.warn('[shots] setPrompt failed during staging', error);
-    }
   } else if (name === 'mission') {
-    // Mission 8 finale: take the Coral Club. Rico drives south on road
-    // x = 58 toward the tower, then the frame is pinned to the tower
-    // stage — marker at (58,29), rival shooters at the tower.
-    putPlayerInCar(world, 58, -120, 0);
+    // Mission 10, Midnight Delivery: the mission itself jumps the clock
+    // to midnight and lights four blue harbour rings. Rico drives north
+    // on road x = -174 toward the first drop at the yard gate, stopping
+    // ~13 m short of the ring (outside its 10 m trigger) so the
+    // delivery does not complete mid-stage.
+    putPlayerInCar(world, -174, -196, Math.PI);
     try {
       if (systems.missions && typeof systems.missions.startMission === 'function') {
-        systems.missions.startMission(8);
+        systems.missions.startMission(10);
       }
     } catch (error) {
       console.warn('[shots] startMission failed during staging', error);
     }
-    const stop = new THREE.Vector3(58, 0, 10);
+    const stop = new THREE.Vector3(-174, 0, -220);
     const steps = Math.round(MISSION_SECONDS / STEP);
     for (let i = 0; i < steps; i += 1) {
       driveToward(world, stop);
       stepWorld(world, STEP);
-      if (focusPos(world).z >= 10) break;
+      if (focusPos(world).z <= -220) break;
     }
-    // Pin the frame to the tower stage: marker at the Coral Club roadside
-    // point, ~19 m ahead of the car, outside the arrival radius so the
-    // mission does not complete during staging. One step lets the mission
-    // system move its beacon onto the marker (and the combat system spawn
-    // its rival shooters for this stage, when it supports mission 8).
-    if (world.mission) {
-      world.mission.id = 8;
-      world.mission.stage = 2;
-      world.mission.objective = 'Take the Coral Club';
-      world.mission.marker = new THREE.Vector3(58, 2, 29);
-    }
+    // One step lets the mission system move its beacon onto the marker,
+    // then pin the frame to the delivery stage: marker at the first drop
+    // (the yard gate), ~13 m ahead of the car, outside the 10 m ring.
     stepWorld(world, STEP);
+    if (world.mission) {
+      world.mission.id = 10;
+      world.mission.stage = 0;
+      world.mission.objective = 'Midnight Delivery — drop 1 of 4';
+      world.mission.marker = new THREE.Vector3(-170, 2, -232);
+    }
   } else {
-    // 'drive' (and any unknown name): a new-district showcase — south down
-    // road x = 0 from (0,60) to (0,252), ending facing the beach and
-    // boardwalk head-on, stalls + pier + sea filling the frame. The start
-    // is far south on purpose: 7 s at ~32 m/s only covers ~200 m, so
-    // starting at z = -100 never got the car close to the boardwalk.
-    putPlayerInCar(world, 0, 60, 0);
-    const target = new THREE.Vector3(0, 0, 252);
+    // 'drive' (and any unknown name): the Old Town Loop street race.
+    // Rico starts on road x = -174 just north of the quarter and races
+    // south past the start gantry, the townhouses and the cathedral,
+    // chasing the blue checkpoint rings down the west side of the city.
+    setClock(world, 10);
+    putPlayerInCar(world, -174, -96, 0);
+    try {
+      const acts = systems.activities;
+      if (acts && typeof acts.startRace === 'function') {
+        acts.startRace({
+          id: 'oldtown',
+          name: 'Old Town Loop',
+          prize: 600,
+          par: 75,
+          start: { x: -174, z: -58 },
+          checkpoints: [
+            { x: -174, z: -58 },
+            { x: -174, z: 116 },
+            { x: 0, z: 116 },
+            { x: 0, z: -58 },
+            { x: -174, z: -58 },
+          ],
+        });
+      }
+    } catch (error) {
+      console.warn('[shots] startRace failed during staging', error);
+    }
+    const target = new THREE.Vector3(-174, 0, 116);
     const steps = Math.round(DRIVE_SECONDS / STEP);
     for (let i = 0; i < steps; i += 1) {
       driveToward(world, target);
       stepWorld(world, STEP);
-      if (focusPos(world).z >= 252) break;
+      if (focusPos(world).z >= 116) break;
     }
   }
 

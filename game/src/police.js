@@ -6,6 +6,10 @@
 // A police car that touches the on-foot player for 2 s straight busts him:
 // mode 'busted', $200 fine, wanted cleared, respawn at the police station.
 // Wanted decays 1 star per 20 s with no crime and no police within 40 m.
+// v3: the policeai system adds flanking (the first two cars swing ahead
+// of the player at 3+ stars), spike strips, and a pursuit speed boost —
+// police.js asks it for a flank point and a boost each step, and chases
+// head-on when it is absent.
 //
 // Events are read by index (seenEvents) and never removed: traffic.js reads
 // the same queue for 'gunshot' / 'pedFlee' events.
@@ -279,8 +283,29 @@ export function createPolice(scene, world) {
     const dx = pp.x - car.pos.x;
     const dz = pp.z - car.pos.z;
     const d = Math.hypot(dx, dz) || 1;
-    // Steer at the player; the aggressive tier turns harder and runs faster.
-    const wantHeading = Math.atan2(dx, dz);
+    // v3 — flanking: at 3+ stars the police AI assigns the first two
+    // pursuit cars points ahead-left / ahead-right of the player, so the
+    // chase closes from three sides instead of one tail. A car that is
+    // already close ignores the flank and rams. The assignment comes
+    // from the policeai system; without it, every car chases head-on.
+    let steerX = pp.x;
+    let steerZ = pp.z;
+    try {
+      const ai = world.systems && world.systems.policeai;
+      if (ai && typeof ai.flankTarget === 'function') {
+        const idx = policeCars.indexOf(car);
+        const flank = ai.flankTarget(idx, car.pos);
+        if (flank) {
+          steerX = flank.x;
+          steerZ = flank.z;
+        }
+      }
+    } catch (err) {
+      // A bad flank read never breaks the chase.
+    }
+    // Steer at the player (or the flank point); the aggressive tier
+    // turns harder and runs faster.
+    const wantHeading = Math.atan2(steerX - car.pos.x, steerZ - car.pos.z);
     car.heading = turnToward(car.heading, wantHeading, (aggressive ? 3.0 : 2.2) * dt);
     // Close in, then hold: on an on-foot player the car pulls up and stops
     // on top of him (that is what makes the 2 s bust timer possible — a car
@@ -290,7 +315,16 @@ export function createPolice(scene, world) {
     if (onFoot) {
       target = d < 3 ? 0 : Math.min(8, d * 1.5);
     } else {
-      const top = aggressive ? car.maxSpeed : 30;
+      // v3 — pursuit boost: at high heat the police AI grants the chase
+      // cars a few extra m/s, so 4- and 5-star chases stay dangerous.
+      let boost = 0;
+      try {
+        const ai = world.systems && world.systems.policeai;
+        if (ai && typeof ai.extraSpeed === 'function') boost = ai.extraSpeed() || 0;
+      } catch (err) {
+        boost = 0;
+      }
+      const top = aggressive ? car.maxSpeed + boost : 30;
       target = d < 4 ? top * 0.55 : top;
     }
     const rate = target < car.speed ? 18 : 9;

@@ -63,6 +63,62 @@ export function createRenderer(canvas) {
   scene.add(sun);
   scene.add(sun.target);
 
+  // v3 — the night sky: a pale moon disc and a field of stars, both
+  // invisible by day. The day/night system drives them through
+  // setCelestial(night01) below; they hang far above the city so they
+  // never collide with anything.
+  const moonMat = new THREE.MeshBasicMaterial({
+    color: 0xf2ead0,
+    transparent: true,
+    opacity: 0,
+    fog: false,
+  });
+  const moon = new THREE.Mesh(new THREE.CircleGeometry(22, 32), moonMat);
+  moon.position.set(320, 420, -520);
+  moon.lookAt(0, 0, 0);
+  moon.visible = false;
+  scene.add(moon);
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 420;
+  const starPos = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i += 1) {
+    const a = Math.random() * Math.PI * 2;
+    const e = 0.25 + Math.random() * 1.2; // elevation above the horizon
+    const r = 900;
+    starPos[i * 3] = Math.cos(a) * Math.cos(e) * r;
+    starPos[i * 3 + 1] = Math.sin(e) * r;
+    starPos[i * 3 + 2] = Math.sin(a) * Math.cos(e) * r;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+  const starMat = new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 2.2,
+    transparent: true,
+    opacity: 0,
+    fog: false,
+    sizeAttenuation: false,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  stars.visible = false;
+  scene.add(stars);
+
+  /** v3 — fade the moon and stars in as night falls (0 = day, 1 = night). */
+  function setCelestial(night01) {
+    const n = Math.max(0, Math.min(1, night01 || 0));
+    moon.visible = n > 0.03;
+    stars.visible = n > 0.03;
+    moonMat.opacity = n * 0.95;
+    starMat.opacity = n * 0.9;
+  }
+
+  /** v3 — dim the filmic exposure a touch at night so the dark streets
+   * read as night instead of a grey day. The day/night system calls
+   * this with the same night factor it feeds setCelestial. */
+  function setNightExposure(night01) {
+    const n = Math.max(0, Math.min(1, night01 || 0));
+    renderer.toneMappingExposure = 1.05 - n * 0.2;
+  }
+
   function resize() {
     const width = canvas.clientWidth || window.innerWidth;
     const height = canvas.clientHeight || window.innerHeight;
@@ -90,5 +146,5 @@ export function createRenderer(canvas) {
     renderer.render(scene, camera);
   }
 
-  return { renderer, scene, camera, sun, hemi, resize, update, render };
+  return { renderer, scene, camera, sun, hemi, resize, update, render, setCelestial, setNightExposure };
 }

@@ -17,6 +17,15 @@ export const AMMO_PRICE = 100;
 export const SAFEHOUSE_PRICE = 300;
 export const SAFEHOUSE_COOLDOWN = 60; // seconds between safehouse uses
 export const AMMO_FULL = 24;
+// v3 — the shop's new stock. Rifle rounds cost more than pistol rounds
+// (the R key charges by the weapon Rico is holding); a NOS canister
+// refills the boost tank outright, and the vest soaks half of every
+// hit until its 100 durability runs out (combat.js spends it).
+export const RIFLE_AMMO_PRICE = 150;
+export const NOS_PRICE = 80;
+export const ARMOR_PRICE = 250;
+export const ARMOR_DURABILITY = 100;
+const AMMO_PRICES = { pistol: 100, smg: 100, shotgun: 100, rifle: 150 };
 
 const SAVE_KEY = 'solmar-city-save-v1';
 
@@ -94,6 +103,9 @@ export function createShops(scene, world) {
   // Edge-trigger memory: holding Q must buy once, not once per frame.
   let qWasDown = false;
   let rWasDown = false;
+  // v3: the same edge memory for the new stock — B (NOS) and V (vest).
+  let bWasDown = false;
+  let vWasDown = false;
 
   function say(text) {
     try {
@@ -137,7 +149,17 @@ export function createShops(scene, world) {
   }
 
   function buyAmmo() {
-    if (!pay(AMMO_PRICE)) return;
+    // v3 — rifle rounds cost more: the price follows the weapon Rico
+    // is holding (pistol / SMG / shotgun $100, rifle $150).
+    let price = AMMO_PRICE;
+    try {
+      const combat = world.systems && world.systems.combat;
+      const weapon = combat && combat.state ? combat.state.weapon : null;
+      if (weapon && AMMO_PRICES[weapon] !== undefined) price = AMMO_PRICES[weapon];
+    } catch {
+      price = AMMO_PRICE;
+    }
+    if (!pay(price)) return;
     let refilled = false;
     try {
       const combat = world.systems && world.systems.combat;
@@ -159,7 +181,25 @@ export function createShops(scene, world) {
       }
     }
     jingle();
-    say('Ammo restocked — 24 rounds.');
+    say(`Ammo restocked — $${price}.`);
+  }
+
+  // v3 — NOS canister: refills the boost tank to full on the spot.
+  function buyNos() {
+    if (!pay(NOS_PRICE)) return;
+    if (world.player) world.player.nos = 1;
+    jingle();
+    say('NOS tank full — go burn it.');
+  }
+
+  // v3 — armour vest: 100 durability, soaks half of every hit until it
+  // breaks (combat.js spends it in hurtPlayer). Buying a fresh vest
+  // while one is worn replaces it.
+  function buyArmor() {
+    if (!pay(ARMOR_PRICE)) return;
+    if (world.player) world.player.armor = ARMOR_DURABILITY;
+    jingle();
+    say('Armour vest on — half of every hit, until it breaks.');
   }
 
   function saveGame() {
@@ -229,6 +269,8 @@ export function createShops(scene, world) {
     if (!player || !player.pos || !keys) {
       qWasDown = false;
       rWasDown = false;
+      bWasDown = false;
+      vWasDown = false;
       return;
     }
 
@@ -237,6 +279,8 @@ export function createShops(scene, world) {
       setPrompt('');
       qWasDown = keys.has('KeyQ');
       rWasDown = keys.has('KeyR');
+      bWasDown = keys.has('KeyB');
+      vWasDown = keys.has('KeyV');
       return;
     }
 
@@ -244,11 +288,16 @@ export function createShops(scene, world) {
     const nearSafe = distXZ(player.pos, safehousePos) <= SHOP_RANGE;
     const qDown = keys.has('KeyQ');
     const rDown = keys.has('KeyR');
+    const bDown = keys.has('KeyB');
+    const vDown = keys.has('KeyV');
 
     if (nearShop) {
-      setPrompt('Q: Health $150 · R: Ammo $100');
+      // v3 — the full shelf: health, ammo (priced by weapon), NOS, vest.
+      setPrompt('Q: Health $150 · R: Ammo $100 · B: NOS $80 · V: Vest $250');
       if (qDown && !qWasDown) buyHealth();
       if (rDown && !rWasDown) buyAmmo();
+      if (bDown && !bWasDown) buyNos();
+      if (vDown && !vWasDown) buyArmor();
     } else if (nearSafe) {
       const now = world.time || 0;
       const left = SAFEHOUSE_COOLDOWN - (now - state.lastSafehouseAt);
@@ -262,6 +311,8 @@ export function createShops(scene, world) {
 
     qWasDown = qDown;
     rWasDown = rDown;
+    bWasDown = bDown;
+    vWasDown = vDown;
   }
 
   return { update, state };

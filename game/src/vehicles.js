@@ -228,6 +228,15 @@ export function createVehicles(scene, world) {
     const topSpeed = nosBoosting ? car.maxSpeed * NOS_TOP_MULT : car.maxSpeed;
     const accel = nosBoosting ? ACCEL * NOS_ACCEL_MULT : ACCEL;
 
+    // v3 — spike strips: while world.player.spikeSlow counts down (set
+    // by the police AI when the car crosses a strip), shredded tyres
+    // cap the car at a crawl and NOS cannot help. The timer ticks down
+    // in update() below, so the car recovers on its own.
+    let cappedTop = topSpeed;
+    if (player && typeof player.spikeSlow === 'number' && player.spikeSlow > 0) {
+      cappedTop = Math.min(topSpeed, 8);
+    }
+
     // Throttle / brake / reverse. S while rolling forward brakes; at a stop it reverses.
     if (fwd) car.speed += accel * dt;
     if (back) {
@@ -236,7 +245,7 @@ export function createVehicles(scene, world) {
     }
     if (!fwd && !back) car.speed -= car.speed * ROLLING_DRAG * dt;
     if (handbrake) car.speed -= car.speed * 2.2 * dt;
-    car.speed = Math.max(-REVERSE_TOP, Math.min(topSpeed, car.speed));
+    car.speed = Math.max(-REVERSE_TOP, Math.min(cappedTop, car.speed));
 
     // Steering: smooth toward the held input, stronger at low speed.
     const steerTarget = steerInput * (0.55 + 0.45 * Math.min(1, Math.abs(car.speed) / 10));
@@ -350,6 +359,12 @@ export function createVehicles(scene, world) {
       } else if (world.player && typeof world.player.nos === 'number') {
         // On foot the tank still refills, so it is full for the next chase.
         world.player.nos = Math.min(1, world.player.nos + NOS_REGEN * capped);
+      }
+      // v3 — shredded tyres recover: the spike-slow timer set by the
+      // police AI ticks down here, so the cap in drivePlayerCar lifts
+      // on its own a few seconds after the strip.
+      if (world.player && typeof world.player.spikeSlow === 'number' && world.player.spikeSlow > 0) {
+        world.player.spikeSlow = Math.max(0, world.player.spikeSlow - capped);
       }
       for (const car of world.cars) {
         if (!car.active) continue;

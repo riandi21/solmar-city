@@ -1,6 +1,6 @@
 // Sound for Solmar City: everything is synthesized live with WebAudio, no audio
 // files. Engine hum, two-tone police siren, gunshot noise, punch thud, a little
-// mission-complete jingle, and a car radio with three switchable synth
+// mission-complete jingle, and a car radio with four switchable synth
 // stations (C cycles them). The AudioContext is only created on the first
 // user gesture (start()), and every method is safe to call before that — it
 // just does nothing until there is sound.
@@ -80,6 +80,26 @@ export function createAudio() {
         [196.0, 246.94, 293.66],
         [174.61, 220.0, 261.63], // F
         [261.63, 329.63, 392.0], // C
+      ],
+    },
+    {
+      name: 'Neon Nights',
+      bpm: 128,
+      wave: 'sawtooth',
+      offbeat: false,
+      // Driving synthwave at night: Am / F / C / G, fast bass, bright pads.
+      // The fourth station is the night-driving one — it pairs with the
+      // day/night cycle and the Midnight Delivery mission.
+      bass: [55.0, 55.0, 55.0, 65.41, 49.0, 49.0, 49.0, 58.27],
+      chords: [
+        [220.0, 261.63, 329.63], // Am
+        [220.0, 261.63, 329.63],
+        [174.61, 220.0, 261.63], // F
+        [196.0, 246.94, 293.66], // G
+        [261.63, 329.63, 392.0], // C
+        [261.63, 329.63, 392.0],
+        [196.0, 246.94, 293.66], // G
+        [220.0, 261.63, 329.63], // Am
       ],
     },
   ];
@@ -282,6 +302,24 @@ export function createAudio() {
       resume();
       noiseBurst(0.14, 0.5, 2800);
       tone(160, 0.09, 'square', 0.18, 0, 55);
+    },
+
+    /** Deeper, longer crack: the rifle (v3). Falls back to shot() if the
+     * caller does not know about it — combat.js prefers this. */
+    rifleShot() {
+      if (!ctx) return;
+      resume();
+      noiseBurst(0.28, 0.65, 1800);
+      tone(110, 0.22, 'sawtooth', 0.22, 0, 38);
+      tone(880, 0.06, 'square', 0.08, 0, 440);
+    },
+
+    /** Bright two-note blip: a hidden package collected (v3). */
+    collect() {
+      if (!ctx) return;
+      resume();
+      tone(987.77, 0.12, 'triangle', 0.22, 0);
+      tone(1318.5, 0.2, 'triangle', 0.22, 0.09);
     },
 
     /** Low thud: a punch landing. */

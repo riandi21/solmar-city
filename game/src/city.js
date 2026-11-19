@@ -201,6 +201,11 @@ export function createCity(scene, rng) {
   }
 
   // ---- Blocks: sidewalks + buildings --------------------------------------
+  // v3: the two west blocks at (-203,-87) and (-203,-29) belong to Old
+  // Town — the quarter builds its own cathedral, plaza and townhouses
+  // there (oldtown.js), so the generic blocks stay out. The sidewalk
+  // slabs still go down; the cobbled plaza sits just above them.
+  const isOldTownBlock = (cx, cz) => cx === -203 && (cz === -87 || cz === -29);
   let buildingCount = 0;
   for (const cx of CITY.blockCentres) {
     for (const cz of CITY.blockCentres) {
@@ -209,6 +214,8 @@ export function createCity(scene, rng) {
       walk.position.set(cx, 0.15, cz);
       walk.receiveShadow = true;
       scene.add(walk);
+
+      if (isOldTownBlock(cx, cz)) continue;
 
       const dist = Math.hypot(cx, cz);
       const isCoralClub = cx === CORAL_CLUB_POS.x && cz === CORAL_CLUB_POS.z;
@@ -687,6 +694,15 @@ export function createCity(scene, rng) {
       freightYard: { x: -170, z: -260 },
       boardwalk: { x: 0, z: 264 },
       pier: { x: 0, z: 318 },
+      // v3: the Old Town quarter (west blocks) and the lighthouse on the
+      // south-west beach. oldtown.js re-asserts these when it builds.
+      // coralClub / penthouse are the ROADSIDE markers (the tower itself
+      // stands at block centre (29,29) inside a building collider).
+      oldTown: { x: -203, z: -58 },
+      lighthouse: { x: -270, z: 300 },
+      coralClub: { x: 58, z: 29 },
+      penthouse: { x: 51, z: 29 },
+      safehouse: { x: -174, z: 232 },
     },
   };
 }

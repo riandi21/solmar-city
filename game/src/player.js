@@ -108,6 +108,11 @@ export function createPlayer(scene, world) {
   world.player.onFoot = true;
   world.player.car = null;
   if (world.player.health === undefined) world.player.health = 100;
+  // v3 — sprint stamina (0..100): Shift sprints only while there is
+  // stamina to spend. It drains fast, refills while walking, and a
+  // fully drained Rico cannot sprint again until it recovers past 10.
+  if (world.player.stamina === undefined) world.player.stamina = 100;
+  let staminaExhausted = false;
 
   const camera = world.camera;
   let camYaw = world.player.heading; // orbit angle: camera sits behind this heading
@@ -206,8 +211,28 @@ export function createPlayer(scene, world) {
     const k = keys();
     const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
     const strafe = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
-    const sprint = k.has('ShiftLeft') || k.has('ShiftRight');
+    const shiftHeld = k.has('ShiftLeft') || k.has('ShiftRight');
     const jump = k.has('Space');
+
+    // v3 — sprint stamina: Shift only sprints while stamina lasts.
+    // Moving while sprinting drains 25/s; walking refills 15/s. Hitting
+    // zero locks sprinting out until stamina recovers past 10, so the
+    // player cannot feather Shift to sprint forever on fumes.
+    const moving = fwd !== 0 || strafe !== 0;
+    let sprint = false;
+    if (shiftHeld && moving && !staminaExhausted && world.player.stamina > 0) {
+      sprint = true;
+      world.player.stamina = Math.max(0, world.player.stamina - 25 * dt);
+      if (world.player.stamina === 0) {
+        staminaExhausted = true;
+        if (world.hud && typeof world.hud.showMessage === 'function') {
+          world.hud.showMessage('Winded! Catch your breath before sprinting again.');
+        }
+      }
+    } else if (!sprint) {
+      world.player.stamina = Math.min(100, world.player.stamina + 15 * dt);
+      if (staminaExhausted && world.player.stamina >= 10) staminaExhausted = false;
+    }
 
     // Move relative to where the camera looks, not where the body faces.
     const sin = Math.sin(camYaw);

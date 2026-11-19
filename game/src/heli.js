@@ -5,6 +5,9 @@
 // always hovers right above the player) and a light disc marks the player
 // on the ground. When the heat drops below 4 stars the heli climbs away
 // and hides. Cheap on purpose: ~10 meshes in one Group + one ground disc.
+// v3: the police AI leads the hover point ahead of a fast player's
+// velocity (heliLead), and the heli drops to a lower hover at night so
+// the spotlight reads against the dark streets.
 import * as THREE from 'three';
 
 const HOVER_HEIGHT = 50; // hover band 45-55 m; ease toward the middle
@@ -99,6 +102,28 @@ export function createHelicopter(scene, world) {
     try {
       const pp = world && world.player && world.player.pos;
       const wanted = (world && world.wanted) || 0;
+      // v3 — heli coordination: the police AI leads the target by his
+      // velocity, so the heli hovers ahead of a fast car instead of
+      // lagging over the rear bumper. At night it also drops lower
+      // (35 m) so its spotlight reads against the dark streets.
+      let leadX = pp ? pp.x : 0;
+      let leadZ = pp ? pp.z : 0;
+      let nightHover = false;
+      try {
+        const ai = world.systems && world.systems.policeai;
+        if (ai && typeof ai.heliLead === 'function') {
+          const lead = ai.heliLead();
+          if (lead && typeof lead.x === 'number') {
+            leadX = lead.x;
+            leadZ = lead.z;
+          }
+        }
+        const dn = world.systems && world.systems.daynight;
+        if (dn && typeof dn.isNight === 'function' && dn.isNight()) nightHover = true;
+      } catch {
+        // Lead and night hover are niceties; the plain hover still works.
+      }
+      const hoverHeight = nightHover ? 35 : HOVER_HEIGHT;
       if (wanted >= 4 && pp) {
         if (!heli.active) {
           // Spawn ~60 m above the player.
@@ -106,9 +131,9 @@ export function createHelicopter(scene, world) {
           group.visible = true;
           heli.active = true;
         }
-        // Follow the player at ~25 m/s horizontally.
-        const dx = pp.x - group.position.x;
-        const dz = pp.z - group.position.z;
+        // Follow the lead point at ~25 m/s horizontally.
+        const dx = leadX - group.position.x;
+        const dz = leadZ - group.position.z;
         const d = Math.hypot(dx, dz);
         if (d > 0.01) {
           const step = Math.min(d, FOLLOW_SPEED * capped);
@@ -117,8 +142,8 @@ export function createHelicopter(scene, world) {
           // Nose follows the direction of travel.
           group.rotation.y = Math.atan2(dx, dz);
         }
-        // Ease into the 45-55 m hover band.
-        const dy = HOVER_HEIGHT - group.position.y;
+        // Ease into the hover band (lower at night).
+        const dy = hoverHeight - group.position.y;
         group.position.y += Math.max(-VERTICAL_SPEED * capped, Math.min(VERTICAL_SPEED * capped, dy));
       } else if (heli.active) {
         // Heat dropped: climb away, then hide.
