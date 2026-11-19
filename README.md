@@ -1,5 +1,9 @@
 # Solmar City
 
+[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![rank](https://make.fun/badge/gta6-01/riandi21/solmar-city/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![reward](https://make.fun/badge/gta6-01/riandi21/solmar-city/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+
 [![make.fun](https://img.shields.io/badge/make.fun-gta6--01-blue)](https://make.fun/c/gta6-01)
 [![Solmar City](https://img.shields.io/badge/game-Solmar%20City-gold)](https://make.fun/c/gta6-01)
 [![Open World](https://img.shields.io/badge/open--world-44%20missions-green)](https://make.fun/c/gta6-01)
