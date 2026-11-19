@@ -1,6 +1,13 @@
+# Solmar City v4 — hand-in output and local clutter
 out/
-# v3: local scratch — test logs, OS files, coverage reports. Never the
-# game itself: game/, screenshots/ and the vendored three.js are tracked.
-*.log
+output/
 .DS_Store
-coverage/
+node_modules/
+*.log
+*.orig
+*.tmp
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

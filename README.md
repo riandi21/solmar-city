@@ -1,74 +1,78 @@
 # Solmar City
 
-An original sun-soaked coastal open-world crime game, built for the make.fun GTA 6 bounty. You are Rico Vega, a driver-for-hire who owes $5,000 to Madame Coral. Steal cars, run her jobs across a 9×9-block seaside city, outrun the Solmar PD as your wanted level climbs, and buy your way out of the debt — on foot or behind the wheel, with traffic, pedestrians, police chases and a police helicopter at 4 stars, 12 story missions, fists / pistol / SMG / shotgun / rifle combat, NOS boost, a 4-station car radio, shops and a safehouse, a HUD with a minimap, and saves.
+[![Solmar City on make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
+[![Solmar City rank on make.fun](https://make.fun/badge/gta6-01/riandi21/solmar-city/rank.svg)](https://make.fun/bounty/gta6-01)
+[![Solmar City reward on make.fun](https://make.fun/badge/gta6-01/riandi21/solmar-city/reward.svg)](https://make.fun/bounty/gta6-01)
 
-**v3 — what's new:** a full day/night cycle (the sun moves, street lamps and headlights come on after dark, press N to skip time); the Old Town quarter with a cathedral, cobbled plaza and fountain, plus a working lighthouse with a rotating beam on the south-west beach; the Harbor War arc (missions 9–12, $20,000 — escort a truck, run a midnight delivery, ram Dourado cars off the pier road, take the lighthouse); smarter police (flanking cars, spike strips at 3+ stars, a helicopter that leads its target); side activities (4 street races with checkpoint rings and cash prizes, 20 hidden packages worth $50 each, taxi fares); a rifle (key 5, long-range); new shop stock (NOS refill $80, armour vest $250); and a HUD with a clock, a mission tracker, an activity tracker, and district labels on the minimap.
 
-[![GTA 6 bounty](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
-[![Rank](https://make.fun/badge/gta6-01/riandi21/solmar-city/rank.svg)](https://make.fun/bounty/gta6-01)
-[![Reward](https://make.fun/badge/gta6-01/riandi21/solmar-city/reward.svg)](https://make.fun/bounty/gta6-01)
-
-## Controls
-
-- **W A S D / arrow keys** — drive or walk (camera-relative on foot)
-- **Shift** — sprint on foot (stamina) · **Shift in a car** — NOS boost
-- **Space** — jump
-- **E** — enter / exit car
-- **F** — punch · **Click** — shoot
-- **1 / 2 / 3 / 4 / 5** — fists / pistol / SMG / shotgun / rifle
-- **C** — change radio station (Solmar FM · Coral Nights · Portside · Neon Nights)
-- **Q / R** — on foot near a shop: buy health ($150) / ammo ($100, rifle $150); **B** — NOS refill ($80); **V** — armour vest ($250); near the safehouse: Q saves, heals and clears your wanted level ($300, 60 s cooldown)
-- **T** — start a street race at a start gantry · **N** — skip to dawn / dusk
-- **Drag mouse** — orbit the chase camera
-- **P / Esc** — pause · **M** — mute sound · **Enter** — confirm / restart
-
-## How to play locally
-
-```sh
-node serve.ts
-```
-
-Then open http://localhost:8080 in desktop Chrome. No build step, no network requests — the game is plain static files under `game/`, with three.js vendored at `game/vendor/three.module.min.js`. Progress saves automatically to your browser (mission complete and every 30 seconds); **Continue** on the start screen picks it back up.
+A neon open-world crime game that runs offline in a desktop browser.
+Three.js, no build step, no network requests — just open `game/index.html`.
 
 ## The story
 
-Twelve jobs stand between Rico and freedom: steal wheels for the Coral Club, run three packages across town against the clock, survive a three-star wanted level for a full minute, pull the Marina Job with a crew — then defend Coral's turf from the Dourado, and end the Harbor War at the lighthouse. Each job pays; the debt is $5,000, and the Harbor War arc alone pays $20,000. The city — downtown towers, quiet residential streets, the Old Town quarter, a beach and boardwalk on the south edge and a marina on the east — is yours to cross however you like, day or night. Just mind the blue lights — and the helicopter once you hit four stars.
+Rico Vega came back to Solmar City with nothing but a busted sedan and a
+debt: **$5,000 owed to Madame Coral**, and she does not wait. Run her
+sixteen jobs — chases, heists, races, the harbor war — earn the cash, and
+buy your way out before the city eats you.
 
-## Side activities
+## The city
 
-- **Street races** — four courses (Boardwalk Sprint $300, Old Town Loop $600, Lighthouse Dash $900, Harbor Grand Prix $1,200). Stand on a checkered start gantry and press **T**; beat your best time.
-- **Hidden packages** — 20 gold parcels stashed around the city, $50 each. The HUD counts them.
-- **Taxi jobs** — pull up in a car when a fare waves you down, drive them to the gold marker, get paid by the distance.
+- A 522×522 m grid city: downtown towers, the Casino Strip, the marina and
+  its yacht, the Old Town and lighthouse, the boardwalk pier, and the
+  airfield in the north-east.
+- Day/night cycle, weather, traffic, pedestrians, police who chase, and a
+  police helicopter that joins the hunt when the heat rises.
+- Boats in the marina basin, a plane job at the airfield, slots at the
+  casino, taxi fares, street races, and hidden packages to collect.
 
-## Systems (for contributors)
+## Systems
 
-Every system is one ES module under `game/src/` with a single factory that
-takes the scene and the shared `world` object; `main.js` loads each one
-guarded, so a missing module is skipped instead of killing the boot.
+- **16 missions** — a full story arc from Rico's first errand for Madame
+  Coral to the Harbor War finale.
+- **Driving & NOS** — traffic cars, handbrake turns, NOS boost, police
+  pursuits with wanted stars.
+- **Combat** — five weapons (pistol, SMG, shotgun, rifle, sniper) with
+  ammo, armor, and health.
+- **Economy** — cash from jobs, fares, races and slots; spend it at the
+  street shop (health, ammo, rifle ammo, NOS, armor) or rest at the
+  safehouse ($300: save, heal, clear your wanted level).
+- **Audio** — fully synthesized WebAudio: engine hum that follows your
+  speed, two-tone police sirens, gunshots, and four radio stations
+  (C to change, M to mute).
+- **HUD & minimap** — cash, health/armor bars, wanted stars, objective,
+  speed, clock, district name, mission tracker, and a live minimap.
+- **Saves** — progress persists in localStorage (`solmar-city-v4`).
 
-| System | File | Owns |
-|---|---|---|
-| City | `city.js` | Roads, buildings, beach, marina, districts |
-| Old Town | `oldtown.js` | Cathedral, plaza, townhouses, lighthouse |
-| Day/night | `daynight.js` | Clock, sun/moon, lamps, headlights |
-| Renderer | `render.js` | WebGL renderer, sky, fog, moon + stars |
-| Player | `player.js` | On-foot movement, stamina, entering cars |
-| Vehicles | `vehicles.js` | Arcade driving, NOS, collisions |
-| Traffic | `traffic.js` | Traffic cars, pedestrians, race slowdown |
-| Police | `police.js` | Wanted level, pursuit, roadblocks, busted |
-| Police AI | `policeai.js` | Flanking, spike strips, heli lead |
-| Helicopter | `heli.js` | 4-star police helicopter + spotlight |
-| Missions | `missions.js` | Story flow, stages, markers, rewards |
-| Harbor War | `missions3.js` | Escort, delivery, takedown mechanics |
-| Combat | `combat.js` | Fists, pistol, SMG, shotgun, rifle, rivals |
-| Shops | `shops.js` | Shop + safehouse, NOS, armour vest |
-| Activities | `activities.js` | Races, packages, taxi jobs |
-| Audio | `audio.js` | WebAudio synth: engine, siren, 4 radio stations |
-| HUD | `hud.js` | Cash, health, stars, minimap, trackers |
-| Save | `save.js` | localStorage save (v3 fields) |
-| Shots | `shots.js` | The four staged screenshot scenes |
+## Controls
 
-Shared helpers live in `world.js` (angles, distances, clocks) and tuning
-in `config.js`. The fixed simulation step is 1/60 s; systems run in the
-order listed in `main.js` (`stepOrder`), and `shots.js` stages scenes in
-that same order so screenshots play identically to live play.
+| Keys | Action |
+| --- | --- |
+| WASD / Arrows | Move / drive |
+| Shift | Sprint on foot / NOS boost while driving |
+| Space | Jump on foot / handbrake while driving |
+| E | Enter / exit car or boat |
+| F | Punch |
+| 1–5 | Weapons |
+| C | Radio station |
+| M | Mute |
+| P / Esc | Pause (saves) |
+| N | Skip to night |
+| R | Race |
+| Y | Taxi |
+| Q | Slots |
+| H / J / K / L / U | Shop buys (near the shop): health $150, ammo $100, rifle ammo $150, NOS $80, armor $250 |
+| T | Safehouse $300 (near the safehouse) |
+
+## Screenshots
+
+The dossier shots are scripted scenarios, reproducible with
+`?shot=chase`, `?shot=drive`, `?shot=foot` or `?shot=mission` — each runs
+240 fixed simulation steps and signals readiness with
+`window.__shotReady` and the page title `SHOT READY`. The four shots map
+to `shots.json` in order: 1-chase, 2-drive, 3-foot, 4-mission.
+
+## Hand-in
+
+`node main.ts` copies `game/` and `screenshots/` to the output directory
+(`MAKEFUN_OUTPUT_DIR`, else `/output`) and writes `dossier.json` with the
+kit's `buildDossier`.
