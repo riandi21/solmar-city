@@ -1,512 +1,291 @@
-// Solmar City bootstrap: creates the world, wires every system in step order,
-// runs the frame loop with a third-person follow camera, pause AND resume (P
-// toggles both ways), and the menu/start flow.
+// main.js — Solmar City bootstrap. Builds the world, wires every system in
+// STEP_ORDER, runs the frame loop, the follow camera, pause, the menu/start
+// flow, and save stats. Written fresh for Round 16 (v16).
 //
-// WIRING CONTRACTS (Round 12, proven): createCity takes (scene, world) —
-// never (scene, rng). createRng returns a CALLABLE function. world.systems
-// is an ARRAY, initialised as [] before any system is wired. wire() NEVER
-// overwrites world state fields (player, traffic, crew, boats, seaplane,
-// properties, territories, empire, weather, daynight, heat, garage) with
-// system objects — systems live in world.systems or world.systemObjects.
-// wire() tries (scene, world) first, then (world); traffic gets its 3rd
-// arg: traffic(scene, world, city). The city is built FIRST. The bootstrap
-// uses the renderer's scene and camera — never a second scene.
+// HARD RULES (the v10 lesson):
+// - One scene only: the renderer's scene. Never create a second scene.
+// - wire() detects each factory's arity: (scene, world) first, else (world).
+//   traffic gets a 3rd arg, the city object. createCity takes (scene, world).
+// - wire() NEVER overwrites world state fields with system objects. State
+//   fields (player, traffic, crew, boats, ...) keep their DATA; systems go
+//   into world.systems (an ARRAY) and/or world.systemObjects[name].
+// - world.save must exist before any system that calls world.save.save().
+//   So the save system is created FIRST, right after the city, and it also
+//   stays in STEP_ORDER (last) where it is re-used, never re-created.
 
 import * as THREE from 'three';
+import { createRender } from './render.js';
+import { makeWorld } from './world.js';
+import { createCity } from './city.js';
+import { createNorthHills } from './northhills.js';
+import { createIslands } from './islands.js';
+import { createVineyards } from './vineyards.js';
+import { createHavana } from './havana.js';
+import { createSunsetBeach } from './sunsetbeach.js';
+import { createPlayer } from './player.js';
+import { createVehicles } from './vehicles.js';
+import { createMotorcycles } from './motorcycles.js';
+import { createJetSki } from './jetski.js';
+import { createCrew } from './crew.js';
+import { createTraffic } from './traffic.js';
+import { createPolice } from './police.js';
+import { createMissions } from './missions.js';
+import { createMissionRunner } from './missions.js';
+import { createCombat } from './combat.js';
+import { createPlayerHeli } from './playerheli.js';
+import { createHeli } from './heli.js';
+import { createShops } from './shops.js';
+import { createGarage } from './garage.js';
+import { createDayNight } from './daynight.js';
+import { createOldTown } from './oldtown.js';
+import { createPoliceAI } from './policeai.js';
+import { createActivities } from './activities.js';
+import { createBoats } from './boats.js';
+import { createSeaplane } from './seaplane.js';
+import { createWeather } from './weather.js';
+import { createCasino } from './casino.js';
+import { createProperties } from './properties.js';
+import { createTerritories } from './territories.js';
+import { createMissions3 } from './missions3.js';
+import { createMissions4 } from './missions4.js';
+import { createMissions5 } from './missions5.js';
+import { createMissions6 } from './missions6.js';
+import { createMissions7 } from './missions7.js';
+import { createMissions8 } from './missions8.js';
+import { createMissions9 } from './missions9.js';
+import { createMissions10 } from './missions10.js';
+import { createMissions11 } from './missions11.js';
+import { createEmpire } from './empire.js';
+import { createHeat } from './heat.js';
+import { createCartel } from './cartel.js';
+import { createFishing } from './fishing.js';
+import { createSave } from './save.js';
 import { createAudio } from './audio.js';
-import { createInput, ACTION_PAUSE, ACTION_CONFIRM } from './input.js';
+import { createInput } from './input.js';
 import { createHud } from './hud.js';
 import { createShots } from './shots.js';
 
-const STEP = 1 / 60;
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shotParam = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : (Math.random() * 4294967296) >>> 0;
-
-// Step order from the Round 11 brief. The shots module mirrors this order.
 const STEP_ORDER = [
-  ['city', './city.js'],
-  ['northhills', './northhills.js'],
-  ['islands', './islands.js'],
-  ['vineyards', './vineyards.js'],
-  ['havana', './havana.js'],
-  ['sunsetbeach', './sunsetbeach.js'],
-  ['player', './player.js'],
-  ['vehicles', './vehicles.js'],
-  ['motorcycles', './motorcycles.js'],
-  ['jetski', './jetski.js'],
-  ['crew', './crew.js'],
-  ['traffic', './traffic.js'],
-  ['police', './police.js'],
-  ['missions', './missions.js'],
-  ['combat', './combat.js'],
-  ['helicopter', './heli.js'],
-  ['playerheli', './playerheli.js'],
-  ['shops', './shops.js'],
-  ['garage', './garage.js'],
-  ['daynight', './daynight.js'],
-  ['oldtown', './oldtown.js'],
-  ['policeai', './policeai.js'],
-  ['harborwar', './missions3.js'],
-  ['activities', './activities.js'],
-  ['airportjob', './missions4.js'],
-  ['boats', './boats.js'],
-  ['seaplane', './seaplane.js'],
-  ['weather', './weather.js'],
-  ['casino', './casino.js'],
-  ['properties', './properties.js'],
-  ['territories', './territories.js'],
-  ['casinoheist', './missions5.js'],
-  ['douradorevenge', './missions6.js'],
-  ['coralcrown', './missions7.js'],
-  ['solmarlegacy', './missions8.js'],
-  ['donsgambit', './missions9.js'],
-  ['viceking', './missions10.js'],
-  ['kingpin', './missions11.js'],
-  ['empire', './empire.js'],
-  ['heat', './heat.js'],
-  ['cartel', './cartel.js'],
-  ['fishing', './fishing.js'],
+  'city', 'northhills', 'islands', 'vineyards', 'havana', 'sunsetbeach',
+  'player', 'vehicles', 'motorcycles', 'jetski', 'crew', 'traffic', 'police',
+  'missions', 'combat', 'playerheli', 'shops', 'garage',
+  'daynight', 'oldtown', 'policeai', 'activities', 'boats', 'seaplane',
+  'weather', 'casino', 'properties', 'territories',
+  'missions3', 'missions4', 'missions5', 'missions6', 'missions7',
+  'missions8', 'missions9', 'missions10', 'missions11',
+  'empire', 'heat', 'cartel', 'fishing', 'save',
 ];
 
-function pascal(name) {
-  return name.replace(/(^|[^a-zA-Z0-9])([a-zA-Z0-9])/g, (_, __, c) => c.toUpperCase());
-}
+const FACTORIES = {
+  northhills: createNorthHills, islands: createIslands, vineyards: createVineyards,
+  havana: createHavana, sunsetbeach: createSunsetBeach, player: createPlayer,
+  vehicles: createVehicles, motorcycles: createMotorcycles, jetski: createJetSki,
+  crew: createCrew, traffic: createTraffic, police: createPolice,
+  missions: createMissions, combat: createCombat,
+  playerheli: createPlayerHeli, heli: createHeli, shops: createShops,
+  garage: createGarage, daynight: createDayNight, oldtown: createOldTown,
+  policeai: createPoliceAI, activities: createActivities, boats: createBoats,
+  seaplane: createSeaplane, weather: createWeather, casino: createCasino,
+  properties: createProperties, territories: createTerritories,
+  missions3: createMissions3, missions4: createMissions4, missions5: createMissions5,
+  missions6: createMissions6, missions7: createMissions7, missions8: createMissions8,
+  missions9: createMissions9, missions10: createMissions10, missions11: createMissions11,
+  empire: createEmpire, heat: createHeat, cartel: createCartel,
+  fishing: createFishing, save: createSave,
+};
 
-// Fallback world builder, used only if world.js cannot be imported. Mirrors the
-// shared-state section of the Round 11 brief. currentVehicle() checks the
-// boarded flag first (v12 fix): a merely-present heli/seaplane state object
-// must never count as "aboard".
-function buildFallbackWorld(rng) {
-  const player = {
-    position: new THREE.Vector3(58, 0, 29),
-    heading: 0,
-    speed: 0,
-    onFoot: true,
-    health: 100,
-    mesh: null,
-    currentCar: null,
-    currentBike: null,
-    currentBoat: null,
-    currentJetSki: null,
-    currentVehicle() {
-      if (this.currentCar) return this.currentCar;
-      if (this.currentBike) return this.currentBike;
-      if (this.currentBoat) return this.currentBoat;
-      if (this.currentJetSki) return this.currentJetSki;
-      return null;
-    },
-  };
-  return {
-    rng,
-    config: { seed },
-    scene: null,
-    camera: null,
-    renderer: null,
-    player,
-    cars: [],
-    bikes: [],
-    boats: [],
-    jetSkis: [],
-    seaplane: { mesh: null, position: new THREE.Vector3(320, 0, 200), heading: 0, speed: 0, altitude: 0, onWater: true, boarded: false },
-    playerHeli: { mesh: null, position: new THREE.Vector3(29, 78, 29), heading: 0, speed: 0, altitude: 0, rotor: 0, onGround: true, boarded: false },
-    playerBoat: null,
-    playerBike: null,
-    pedestrians: [],
-    crewMembers: [],
-    federalAgents: [],
-    cartelHitmen: [],
-    enemies: [],
-    gangShooters: [],
-    wanted: 0,
-    heat: 0,
-    cartelThreat: 0,
-    cash: 500,
-    armor: 0,
-    nos: 100,
-    tireDamage: 0,
-    mission: { id: 0, stage: 0, objective: '', marker: null, timer: 0 },
-    completedMissions: [],
-    elapsed: 0,
-    timeOfDay: 12,
-    mode: 'menu',
-    input: { keys: new Set(), justPressed: new Set(), mouseDown: false, muteToggle: false, radioNext: false },
-    events: [],
-    city: null,
-    properties: { list: [], income: 0, lastPayout: 0 },
-    territories: { districts: [] },
-    heist: { progress: '' },
-    revenge: { progress: '' },
-    crown: { progress: '', informantMet: false, vaultCracked: false, betrayalSurvived: false, donDefeated: false },
-    legacy: { progress: '', protectionCollected: 0, ledgerStolen: false, blockadeBroken: false, legacySecured: false },
-    gambit: { progress: '', fedsEvaded: false, moneyMoved: false, moleExposed: false, gambitWon: false },
-    vice: { progress: '', casinoRigged: false, highRollerWon: false, havanaRunDone: false, viceKingCrowned: false, casinoWinnings: 0, leaguePoints: 0, leagueWins: 0, nightclubIncome: 0 },
-    kingpin: { progress: '', shipmentSeized: false, informantProtected: false, siegeSurvived: false, kingpinCrowned: false, cartelThreat: 0, fishingBestCatch: '', jetSkiBestTime: 0 },
-    crew: { hired: [], posts: {} },
-    garage: { ownedCars: [], upgrades: {} },
-    empire: { income: 0, posts: {}, rivalThreat: 0 },
-    heatState: { level: 0, lastCrime: 0, raidTimer: 0 },
-    combat: { weapon: 'Pistol', ammo: 60 },
-    fishing: { rodInHand: false, waiting: false, spots: [] },
-    jetski: { riding: false, speed: 0 },
-    vehicles: null,
-    daynight: { hours: 12 },
-    weather: { raining: false, fog: 0 },
-    audioStation: 'Coral FM',
-    currentDistrict: 'Downtown',
-    activity: { text: '' },
-    systems: [],
-    systemObjects: {},
-    saveVersion: 9,
-  };
-}
-
-function fallbackRenderer(canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x87b5d6);
-  scene.fog = new THREE.Fog(0x9fc3dd, 300, 900);
-  const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
-  camera.position.set(58, 8, 45);
-  const sun = new THREE.DirectionalLight(0xffe0b3, 2.2);
-  sun.position.set(200, 300, 100);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -320;
-  sun.shadow.camera.right = 320;
-  sun.shadow.camera.top = 320;
-  sun.shadow.camera.bottom = -320;
-  scene.add(sun);
-  const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 0.9);
-  scene.add(hemi);
-  return {
-    renderer, scene, camera, sun, hemi,
-    resize() {
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-    },
-    render() { renderer.render(scene, camera); },
-    update() {},
-  };
-}
-
-async function boot() {
-  const canvas = document.getElementById('game');
-  const status = document.getElementById('status');
-
-  // RNG: createRng must return a CALLABLE function (Round 12 contract).
-  let rng = null;
-  try {
-    const randomMod = await import('./random.js');
-    const makeRng = randomMod.createRandom || randomMod.createRng || randomMod.default;
-    rng = makeRng ? makeRng(seed) : null;
-  } catch { rng = null; }
-  if (typeof rng !== 'function') {
-    let s = seed >>> 0;
-    const fallback = () => {
-      s = (s * 1664525 + 1013904223) >>> 0;
-      return s / 4294967296;
-    };
-    fallback.range = (a, b) => a + fallback() * (b - a);
-    fallback.pick = (arr) => arr[Math.floor(fallback() * arr.length)];
-    rng = fallback;
-  }
-  // Prove the rng is callable before anything else uses it.
-  const probe = rng();
-  if (typeof probe !== 'number') throw new Error('rng() did not return a number');
-
-  // World: prefer W1's world.js; fall back to the inline builder.
-  let world = null;
-  try {
-    const worldMod = await import('./world.js');
-    const makeWorld = worldMod.createWorld || worldMod.default;
-    if (makeWorld) world = makeWorld(rng);
-  } catch { world = null; }
-  if (!world || !world.player || !world.player.position) world = buildFallbackWorld(rng);
-  world.rng = rng;
+export function boot() {
+  const world = makeWorld();
+  // Systems live here. world.systems MUST stay an array, never an object.
   world.systems = [];
-  world.systemObjects = {};
-  if (!world.input) world.input = { keys: new Set(), justPressed: new Set(), mouseDown: false };
-  if (!Array.isArray(world.events)) world.events = [];
+  world.systemObjects = world.systemObjects || {};
 
-  // Renderer: use W1's render.js scene + camera; never a second scene.
-  let renderHandle = null;
-  try {
-    const renderMod = await import('./render.js');
-    const makeRenderer = renderMod.createRenderer || renderMod.default;
-    if (makeRenderer) renderHandle = makeRenderer(canvas);
-  } catch { renderHandle = null; }
-  if (!renderHandle || !renderHandle.scene || !renderHandle.camera) {
-    renderHandle = fallbackRenderer(canvas);
-  }
-  world.scene = renderHandle.scene;
-  world.camera = renderHandle.camera;
-  world.renderer = renderHandle.renderer;
-  const scene = renderHandle.scene;
-  const camera = renderHandle.camera;
+  const renderer = createRender(document.getElementById('game'));
+  const scene = renderer.scene;
+  const camera = renderer.camera;
+  world.scene = scene;
+  world.camera = camera;
+  world.renderer = renderer;
+  world.THREE = THREE;
 
-  window.addEventListener('resize', () => {
-    if (renderHandle.resize) renderHandle.resize();
-  });
+  // City FIRST so world.city exists with roads and colliders.
+  const city = createCity(scene, world);
+  world.city = city;
 
-  const audio = createAudio(world);
-  const input = createInput(world, canvas);
-  const hud = createHud(world);
-  world.input.keys = input.keys;
-  world.input.justPressed = input.justPressed;
-
-  // wire(): tries (scene, world) first, then (world). Traffic gets city as
-  // 3rd arg. Results go to world.systems (array) / world.systemObjects —
-  // NEVER onto a world state field.
-  let city = null;
-  async function wire(name, path) {
-    let mod = null;
-    try {
-      mod = await import(path);
-    } catch (err) {
-      console.warn('[wire] missing module', name, path, err && err.message);
-      return null;
+  // Save FIRST among systems so world.save exists before anyone calls it.
+  const wired = {};
+  function wire(name, factory) {
+    if (wired[name]) return wired[name];
+    let sys;
+    if (name === 'traffic') {
+      sys = factory.length >= 3 ? factory(scene, world, city) : factory(scene, world);
+    } else if (factory.length >= 2) {
+      sys = factory(scene, world);
+    } else {
+      sys = factory(world);
     }
-    const candidates = [
-      mod['create' + pascal(name)],
-      mod.default,
-      mod[name],
-    ];
-    let factory = null;
-    for (const c of candidates) if (typeof c === 'function') { factory = c; break; }
-    if (!factory) {
-      const fns = Object.values(mod).filter((v) => typeof v === 'function');
-      if (fns.length === 1) factory = fns[0];
-    }
-    if (!factory) {
-      console.warn('[wire] no factory in', name);
-      return null;
-    }
-    let sys = null;
-    try {
-      if (name === 'traffic') sys = factory(scene, world, city);
-      else sys = factory(scene, world);
-    } catch (err1) {
-      try {
-        sys = name === 'traffic' ? factory(world, city) : factory(world);
-      } catch (err2) {
-        console.warn('[wire] factory failed', name, err2 && err2.message, '| first:', err1 && err1.message);
-        return null;
-      }
-    }
+    wired[name] = sys;
     if (sys) {
-      world.systems.push(sys);
+      if (!sys.name) sys.name = name;
       world.systemObjects[name] = sys;
+      if (typeof sys.update === 'function') world.systems.push(sys);
     }
     return sys;
   }
 
-  // City FIRST so world.city (roads + colliders) exists for every later system.
-  const citySys = await wire('city', './city.js');
-  city = citySys && citySys.roads ? citySys : (world.city || null);
-  if (city) world.city = city;
+  const save = wire('save', createSave);
+  world.save = save;
 
-  for (const [name, path] of STEP_ORDER) {
+  // Core shell systems: input, audio, hud, shots.
+  const input = createInput(world);
+  world.systemObjects.input = input;
+  if (typeof input.update === 'function') world.systems.push(input);
+  const audio = createAudio(world);
+  world.systemObjects.audio = audio;
+  if (typeof audio.update === 'function') world.systems.push(audio);
+  const hud = createHud(world);
+  world.systemObjects.hud = hud;
+  world.hud = hud;
+  if (typeof hud.update === 'function') world.systems.push(hud);
+  const shots = createShots(world);
+  world.systemObjects.shots = shots;
+  world.shots = shots;
+  if (typeof shots.update === 'function') world.systems.push(shots);
+
+  // Police helicopter (heli.js) rides alongside the helicopter systems.
+  wire('heli', createHeli);
+
+  // Wire the rest in STEP_ORDER. 'save' is already wired; re-use it.
+  for (const name of STEP_ORDER) {
     if (name === 'city') continue;
-    await wire(name, path);
+    if (name === 'save') { world.save = wired.save; continue; }
+    const factory = FACTORIES[name];
+    if (factory) wire(name, factory);
   }
 
-  // Re-assert the wiring contracts after every system has run.
-  if (!Array.isArray(world.systems)) world.systems = [];
-  if (!world.player || !world.player.position) {
-    const fresh = buildFallbackWorld(rng);
-    world.player = fresh.player;
-  }
-  // Keep the render handle reachable for later systems (weather, day/night).
-  world.renderHandle = renderHandle;
-  if (world.daynight && typeof world.daynight.hours !== 'number') {
-    world.daynight.hours = world.timeOfDay || 12;
-  }
+  // The mission runner: without it no mission can ever start. Created after
+  // every missions factory has registered, so startMission sees M1-M44.
+  // (No helicopter.js exists: the flyable heli is 'playerheli' and the
+  // police heli is 'heli'; there is no separate 'helicopter' step.)
+  createMissionRunner(world);
 
-  const shots = createShots(world, {
-    canvas,
-    render() { draw(); },
-    step(dt) { stepWorld(dt); },
-    setTime(hours) {
-      world.timeOfDay = hours;
-      // The day/night system owns the clock (state.timeOfDay); the old
-      // hook only wrote world.timeOfDay, which the next step overwrote
-      // back to morning — so sunset shots rendered at 10:00. Drive the
-      // real clock so the shot's dusk/sunset actually shows.
-      const dn = world.systemObjects && world.systemObjects.daynight;
-      if (dn && typeof dn.setTime === 'function') dn.setTime(hours);
-      if (world.daynight) {
-        world.daynight.timeOfDay = hours;
-        world.daynight.hours = hours;
-      }
-    },
-  });
-  window.__shots = shots;
-  window.__solmar = { world, shots, audio, hud, input };
+  // Menu / start flow.
+  const menu = document.getElementById('menu');
+  const startBtn = document.getElementById('start-btn');
+  const pauseEl = document.getElementById('pause');
+  let started = false;
+  let paused = false;
+  let over = false;
 
-  function stepWorld(dt) {
-    world.elapsed = (world.elapsed || 0) + dt;
-    if (world.daynight && typeof world.daynight.hours === 'number') {
-      world.daynight.hours = (world.daynight.hours + dt / 240) % 24;
-      world.timeOfDay = world.daynight.hours;
-    }
-    for (const sys of world.systems) {
-      if (!sys) continue;
-      try {
-        if (typeof sys.update === 'function') sys.update(dt);
-        else if (typeof sys === 'function') sys(dt);
-      } catch (err) {
-        console.error('[system] update failed', err);
-      }
-    }
-    if (audio) audio.update(dt);
-  }
-
-  function updateCamera(dt) {
-    const p = world.player && world.player.position;
-    if (!p) return;
-    const heading = world.player.heading || 0;
-    const back = 10;
-    const up = 6;
-    const tx = p.x - Math.sin(heading) * back;
-    const tz = p.z - Math.cos(heading) * back;
-    const ty = (p.y || 0) + up;
-    const k = 1 - Math.pow(0.001, dt);
-    camera.position.x += (tx - camera.position.x) * k;
-    camera.position.y += (ty - camera.position.y) * k;
-    camera.position.z += (tz - camera.position.z) * k;
-    camera.lookAt(p.x, (p.y || 0) + 1.6, p.z);
-  }
-
-  function draw() {
-    // Pass the world through: render.update(dt, world) is what runs the
-    // follow camera (follow(world.player)) and the time-of-day sun. With
-    // no args it never followed, so shot frames stayed at boot position.
-    if (renderHandle.update) renderHandle.update(STEP, world);
-    if (renderHandle.render) renderHandle.render();
-    else if (renderHandle.renderer) renderHandle.renderer.render(scene, camera);
-  }
-
-  function announce(message) {
-    if (status) status.textContent = message;
-  }
-
-  function showMenu(show) {
-    const menu = document.getElementById('menu');
-    if (menu) menu.style.display = show ? 'flex' : 'none';
-  }
-
-  function showPause(show) {
-    const pause = document.getElementById('pause-overlay');
-    if (pause) pause.style.display = show ? 'flex' : 'none';
-  }
+  function show(el2, on) { if (el2) el2.style.display = on ? 'flex' : 'none'; }
 
   function startGame() {
-    world.mode = 'play';
-    showMenu(false);
-    showPause(false);
-    audio.unlock();
-    announce('Playing. Rico Vega is on the streets of Solmar City.');
-    hud.toast('Welcome to Solmar City — steal a car, take a mission, become Kingpin.');
+    if (started) return;
+    started = true;
+    show(menu, false);
+    if (world.save && world.save.load) world.save.load();
+    hud.setObjective('Welcome to Solmar City — follow the marker.');
+    hud.toast('Welcome to Solmar City');
   }
 
   function togglePause() {
-    if (world.mode === 'play') {
-      world.mode = 'pause';
-      showPause(true);
-      announce('Paused.');
-    } else if (world.mode === 'pause') {
-      world.mode = 'play';
-      showPause(false);
-      announce('Playing.');
-    }
+    if (!started || over) return;
+    paused = !paused;
+    show(pauseEl, paused);
   }
 
-  function stepFrame(dt) {
-    if (world.mode !== 'play') return;
-    if (input.pressed('KeyM') || world.input.muteToggle) {
-      audio.toggleMute();
-      world.input.muteToggle = false;
-    }
-    if (input.pressed('KeyC') || world.input.radioNext) {
-      world.audioStation = audio.nextStation();
-      hud.toast('Radio: ' + world.audioStation);
-      world.input.radioNext = false;
-    }
-    stepWorld(dt);
-    hud.update(dt);
+  if (startBtn) startBtn.addEventListener('click', startGame);
+  if (menu) menu.addEventListener('click', (e) => { if (e.target === menu) startGame(); });
+
+  // Third-person follow camera: 10m back, 6m up, travel-direction tracking.
+  const camTarget = new THREE.Vector3();
+  const camPos = new THREE.Vector3();
+  function updateCamera(dt) {
+    const p = world.player || {};
+    const pos = p.position || { x: p.x || 0, y: 0, z: p.z || 0 };
+    const heading = p.heading || 0;
+    const inAir = !!(p.heli || p.helicopter || p.seaplane);
+    const dist = inAir ? 16 : 10;
+    const height = inAir ? 8 : 6;
+    const bx = Math.sin(heading) * dist;
+    const bz = Math.cos(heading) * dist;
+    camTarget.set(pos.x, (pos.y || 0) + 1.5, pos.z);
+    camPos.set(pos.x + bx, (pos.y || 0) + height, pos.z + bz);
+    const k = 1 - Math.exp(-dt * 5);
+    camera.position.lerp(camPos, k);
+    camera.lookAt(camTarget);
   }
 
-  if (shotParam) {
-    world.mode = 'play';
-    showMenu(false);
-    const result = shots.capture(shotParam);
-    void result;
-    // The shot path used to return before the frame loop ever ran, so the
-    // follow camera never moved. Settle it onto the player now: the lerp
-    // closes ~11% per STEP, so 60 settles land it on the target.
-    // hud.update also never ran in shot mode, so the wanted stars,
-    // objective line and minimap would have stayed at boot values.
-    for (let i = 0; i < 60; i += 1) updateCamera(STEP);
-    hud.update(STEP);
-    draw();
-    requestAnimationFrame(() => {
-      for (let i = 0; i < 60; i += 1) updateCamera(STEP);
-      hud.update(STEP);
-      draw();
-      window.__shotReady = true;
+  // Save stats: cash, missions done, time played, wanted level.
+  let saveTimer = 0;
+  function saveStats() {
+    if (!world.save || !world.save.save) return;
+    const p = world.player || {};
+    world.save.save({
+      cash: p.cash || 0,
+      missionsDone: (world.missions && world.missions.done) || 0,
+      playSeconds: Math.floor(world.time || 0),
+      wanted: p.wanted || 0,
     });
-    return;
   }
 
-  // Menu / start flow.
-  showMenu(true);
-  const startBtn = document.getElementById('start-btn');
-  if (startBtn) startBtn.addEventListener('click', () => { audio.unlock(); startGame(); });
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && world.mode === 'play') togglePause();
-  });
+  const clock = new THREE.Clock();
+  let raf = 0;
+  let frames = 0;
 
-  let last = performance.now();
-  let accumulator = 0;
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    const actions = input.takeActions();
-    if (actions & ACTION_PAUSE) togglePause();
-    if ((actions & ACTION_CONFIRM) && world.mode === 'menu') startGame();
-    else if ((actions & ACTION_CONFIRM) && world.mode === 'over') startGame();
-    if (world.mode === 'menu' || world.mode === 'play') {
-      while (accumulator >= STEP && (world.mode === 'menu' || world.mode === 'play')) {
-        if (world.mode === 'play') stepFrame(STEP);
-        else stepWorld(STEP);
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
+  function frame() {
+    raf = requestAnimationFrame(frame);
+    const dt = Math.min(clock.getDelta(), 0.1);
+    // P toggles pause BOTH ways; Enter/click starts from the menu.
+    if (world.input && world.input.wasPressed && world.input.wasPressed('KeyP')) togglePause();
+    if (world.input && world.input.wasPressed && world.input.wasPressed('Enter') && !started) startGame();
+    if (!started || paused || over) {
+      renderer.render(scene, camera);
+      return;
     }
-    updateCamera(STEP);
-    draw();
-    input.endFrame();
+    world.time = (world.time || 0) + dt;
+    // Snapshot edge presses BEFORE the systems loop: input.update() clears
+    // the pressed set each frame, so C/M must be read before it runs.
+    const pressedC = world.input && world.input.wasPressed ? world.input.wasPressed('KeyC') : false;
+    const pressedM = world.input && world.input.wasPressed ? world.input.wasPressed('KeyM') : false;
+    for (const sys of world.systems) {
+      try { sys.update(dt); } catch (e) { /* one broken system must not kill the loop */ void e; }
+    }
+    // Radio station cycle (C) and mute (M) live here so they work even if
+    // the audio system is mid-init.
+    if (pressedC) {
+      const name = audio.setStation((audio.stationIndex + 1) % 6);
+      hud.toast('Radio: ' + name);
+    }
+    if (pressedM) hud.toast(audio.toggleMute() ? 'Muted' : 'Sound on');
+    updateCamera(dt);
+    renderer.render(scene, camera);
+    frames++;
+    saveTimer += dt;
+    if (saveTimer > 30) { saveTimer = 0; saveStats(); }
+    // Shots mode: ?shot=1-chase etc. stages, simulates, captures, reports.
+    const params = new URLSearchParams(window.location.search);
+    const shotId = params.get('shot');
+    if (shotId && frames === 2 && shots.captureOne) {
+      const shot = shots.captureOne(shotId, renderer);
+      if (shot) {
+        document.title = 'SHOT READY ' + shotId;
+        window.__shotReady = shot;
+      }
+    }
   }
 
-  announce('Solmar City. Press Space or click Start to play.');
-  requestAnimationFrame(frame);
+  window.addEventListener('beforeunload', saveStats);
+  frame();
+
+  return { world, renderer, scene, camera, startGame, togglePause, saveStats, STEP_ORDER };
 }
 
-boot().catch((err) => {
-  console.error('[boot] failed', err);
-  const status = document.getElementById('status');
-  if (status) status.textContent = 'Solmar City failed to start: ' + (err && err.message);
-});
+// Auto-boot when loaded as the page's module script.
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => boot());
+  } else {
+    boot();
+  }
+}

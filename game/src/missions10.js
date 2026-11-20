@@ -1,224 +1,341 @@
-// missions10.js — Vice King arc, missions 37-40 ($55,000 total).
-// NOTE: missions 33-36 (Don's Gambit) live in missions9 (W7, donsgambit
-// step); this file covers 37-40 only, per the Round 11 brief's file ownership.
-// Rico rigs the rival casino, wins the high-roller table, runs the
-// Havana smuggle, and claims the Vice King crown at Club Neon.
-// Factory: createMissions10(scene, world) or createMissions10(world).
-// Every stage declares `kind` FIRST; the runner calls onComplete on finish.
-// M39: `kind` is declared before it is read — no TDZ anywhere.
+// Missions 33-40 — Don's Gambit (M33-36, $50,000) and Vice King (M37-40, $55,000).
+// The feds are watching, the mole is talking, and the rival casino has to be beaten at
+// its own tables. Gambit is shadows and paperwork; Vice King is felt, dice and speed.
+//
+// Contract: each mission is { id, name, payout, advance, stages, onComplete }.
+// Stage kinds: reach | fight | deliver | survive | tail | escort | timed.
+// The runner advances stages and calls mission.onComplete on completion; the runner
+// pays out mission.payout. Fight stages complete only when the enemy list is empty.
+//
+// CRITICAL: M37 has advance=false — it is staged and advances only on its own
+// trigger, never auto-advance. M38/M40 heli stages complete on their timers once boarded.
 
-function dist2d(a, b) {
-  const dx = (a.x || 0) - (b.x || 0);
-  const dz = (a.z || 0) - (b.z || 0);
-  return Math.sqrt(dx * dx + dz * dz);
-}
+const LOC = {
+  anchorBar: { x: -200, z: 100 },
+  docks: { x: 480, z: 380 },
+  docksWarehouse: { x: 505, z: 355 },
+  marina: { x: 350, z: -420 },
+  islands: { x: 700, z: -500 },
+  oldTown: { x: -350, z: 250 },
+  hideout: { x: -365, z: 265 },
+  vineyard: { x: -500, z: -480 },
+  vineyardGate: { x: -470, z: -460 },
+  casino: { x: 120, z: 180 },
+  highRollerTable: { x: 132, z: 172 },
+  rouletteTable: { x: 112, z: 188 },
+  littleHavana: { x: -300, z: -350 },
+  clubNeon: { x: 60, z: 220 },
+  coralClub: { x: -80, z: -120 },
+  coralRoof: { x: -80, z: -120 },
+  helipad: { x: 60, z: 205 },
+  downtown: { x: 0, z: 0 },
+  fedVanRoute: { x: 150, z: 60 },
+};
 
-function playerPos(world) {
-  const p = world.player && world.player.position;
-  return p || { x: 0, y: 0, z: 0 };
-}
-
-function notify(world, text) {
-  if (!world) return;
-  if (typeof world.toast === 'function') { world.toast(text); return; }
-  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
-  if (world.hud && typeof world.hud.toast === 'function') world.hud.toast(text);
-}
-
-function ensureState(world) {
-  if (!world.viceState) {
-    world.viceState = {
-      casinoRigged: false, highRollerWon: false,
-      havanaRunDone: false, viceKingCrowned: false,
-      casinoWinnings: 0, leaguePoints: 0, leagueWins: 0, nightclubIncome: 0,
-    };
+function spawnShooters(world, list) {
+  const combat = world.systemObjects && world.systemObjects.combat;
+  if (!combat || typeof combat.spawnShooter !== 'function') return;
+  for (const spec of list) {
+    try { combat.spawnShooter(spec.x, spec.z, spec); } catch { /* combat unavailable */ }
   }
-  if (!Array.isArray(world.completedMissions)) world.completedMissions = [];
-  if (!Array.isArray(world.enemies)) world.enemies = [];
-  if (!Array.isArray(world.gangShooters)) world.gangShooters = [];
-  if (typeof world.cash !== 'number') world.cash = 0;
-  if (typeof world.wanted !== 'number') world.wanted = 0;
-  return world.viceState;
 }
 
-function spawnGuards(world, positions, health) {
-  const list = [];
-  for (const pos of positions) {
-    const enemy = {
-      position: { x: pos.x, y: 0, z: pos.z },
-      health: health || 100, maxHealth: health || 100,
-      alive: true, kind: 'gangShooter', state: 'fight',
-    };
-    if (world.combat && typeof world.combat.spawnShooter === 'function') {
-      world.combat.spawnShooter(pos, health || 100);
-    } else {
-      world.enemies.push(enemy);
-      world.gangShooters.push(enemy);
-    }
-    list.push(enemy);
-  }
-  return list;
+function gambitFlag(world, key, value) {
+  if (!world.gambit) world.gambit = {};
+  world.gambit[key] = value;
 }
 
-function aliveEnemies(world) {
-  const list = world.enemies || [];
-  return list.filter((e) => e && e.alive !== false && (e.health === undefined || e.health > 0));
+function viceFlag(world, key, value) {
+  if (!world.vice) world.vice = { casinoWinnings: 0, racePoints: 0, raceWins: 0 };
+  world.vice[key] = value;
 }
 
-function heliBoarded(world) {
-  const h = world.playerHeli || world.heli;
-  if (!h) return false;
-  if (typeof h.boarded === 'boolean') return h.boarded;
-  if (world.player && world.player.inHeli) return true;
-  return false;
+function note(world, text) {
+  if (Array.isArray(world.events)) world.events.push({ type: 'mission', text });
 }
 
-function isNight(world) {
-  if (world.daynight && typeof world.daynight.isNight === 'boolean') return world.daynight.isNight;
-  if (typeof world.timeOfDay === 'number') return world.timeOfDay < 6 || world.timeOfDay >= 20;
-  if (typeof world.hour === 'number') return world.hour < 6 || world.hour >= 20;
-  return false;
-}
-
-export const MISSIONS_37_40 = [
+export const missions10 = [
   {
-    id: 37, name: 'Rigged Wheel', arc: 'vice', reward: 8000,
-    briefing: 'Rig the rival casino\'s roulette table. Keep wanted at 2 stars or below.',
+    id: 'M33',
+    name: 'Eyes on the Feds',
+    payout: 6000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Enter the casino', target: { x: 120, y: 0, z: 90 }, radius: 14, text: 'Enter the rival casino' },
-      { kind: 'maxWanted', name: 'Rig the roulette', target: { x: 120, y: 0, z: 90 }, radius: 10, duration: 20, maxWanted: 2, text: 'Rig the roulette table (stay under 3 stars)' },
-      { kind: 'reach', name: 'Slip out', target: { x: 100, y: 0, z: 60 }, radius: 12, text: 'Slip out to the Anchor Bar' },
+      {
+        kind: 'tail',
+        objective: 'Tail the federal surveillance van without being spotted',
+        marker: { x: LOC.fedVanRoute.x, z: LOC.fedVanRoute.z },
+        radius: 16,
+        timer: 180,
+        stealth: true,
+        failOnSpotted: true,
+      },
+      {
+        kind: 'reach',
+        objective: 'Note the van\'s drop point and slip away',
+        marker: { x: LOC.downtown.x, z: LOC.downtown.z },
+        radius: 12,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.casinoRigged = true;
-      world.cash += 8000;
-      notify(world, 'M37 complete: roulette rigged. +$8,000');
+      gambitFlag(world, 'vanTailed', true);
+      note(world, 'Federal surveillance van tailed clean. You know their routes now.');
     },
   },
   {
-    id: 38, name: 'High Roller', arc: 'vice', reward: 13000,
-    briefing: 'Win $20,000 at the high-roller table, then escape a rival ambush in the player helicopter.',
+    id: 'M34',
+    name: 'Night Crossing',
+    payout: 12000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Reach the high-roller table', target: { x: 120, y: 0, z: 90 }, radius: 12, text: 'Reach the high-roller table' },
-      { kind: 'casino', name: 'Win $20,000', target: { x: 120, y: 0, z: 90 }, radius: 12, winTarget: 20000, text: 'Win $20,000 at the high-roller table' },
-      { kind: 'fly', name: 'Escape by helicopter', target: { x: 29, y: 0, z: 29 }, radius: 20, text: 'Escape the ambush by helicopter to the Coral Club' },
+      {
+        kind: 'reach',
+        objective: 'Load $50,000 of empire money onto the boat at the marina — after dark',
+        marker: { x: LOC.marina.x, z: LOC.marina.z },
+        radius: 12,
+        boatStage: true,
+        nightOnly: true,
+      },
+      {
+        kind: 'timed',
+        objective: 'Run the money to The Islands by boat, lights off',
+        marker: { x: LOC.islands.x, z: LOC.islands.z },
+        radius: 16,
+        timer: 240,
+        boatStage: true,
+      },
+      {
+        kind: 'deliver',
+        objective: 'Hand the money to the island contact',
+        marker: { x: LOC.islands.x, z: LOC.islands.z },
+        radius: 12,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.highRollerWon = true;
-      world.cash += 13000;
-      notify(world, 'M38 complete: high-roller won, ambush escaped. +$13,000');
+      gambitFlag(world, 'moneyMoved', true);
+      note(world, '$50,000 moved to The Islands by night boat. The feds never saw a wake.');
     },
   },
   {
-    id: 39, name: 'Havana Run', arc: 'vice', reward: 15000,
-    briefing: 'Smuggle goods from Little Havana to The Islands by boat at night.',
+    id: 'M35',
+    name: 'The Mole',
+    payout: 14000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Pick up the goods', target: { x: -215, y: 0, z: 130 }, radius: 12, text: 'Pick up the goods in Little Havana' },
-      { kind: 'nightBoat', name: 'Smuggle by boat at night', target: { x: 370, y: 0, z: 360 }, radius: 20, text: 'Smuggle the goods to The Islands by boat (night only)' },
+      {
+        kind: 'tail',
+        objective: 'Follow the mole from the Anchor Bar to the Docks',
+        marker: { x: LOC.docks.x, z: LOC.docks.z },
+        radius: 14,
+        timer: 200,
+        stealth: true,
+      },
+      {
+        kind: 'fight',
+        objective: 'Confront the mole and his backup at the Docks',
+        marker: { x: LOC.docksWarehouse.x, z: LOC.docksWarehouse.z },
+        radius: 18,
+        enemies: [
+          { x: 498, z: 348 }, { x: 512, z: 348 }, { x: 505, z: 362 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 498, z: 348 }, { x: 512, z: 348 }, { x: 505, z: 362 },
+          ]);
+        },
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.havanaRunDone = true;
-      world.cash += 15000;
-      notify(world, 'M39 complete: Havana run done. +$15,000');
+      gambitFlag(world, 'moleConfronted', true);
+      note(world, 'The mole is dealt with. Nobody in the crew talks to the feds anymore.');
     },
   },
   {
-    id: 40, name: 'Vice King', arc: 'vice', reward: 19000,
-    briefing: 'Defend Club Neon from a rival assault, then fly the helicopter to the Coral Club rooftop and claim the Vice King crown.',
+    id: 'M36',
+    name: 'False Flag',
+    payout: 18000,
+    advance: true,
     stages: [
-      { kind: 'defend', name: 'Defend Club Neon', target: { x: 120, y: 0, z: 90 }, radius: 16, duration: 60, enemies: [{ x: 115, z: 85 }, { x: 125, z: 85 }, { x: 120, z: 95 }, { x: 110, z: 90 }], text: 'Defend Club Neon from the rival assault' },
-      { kind: 'fly', name: 'Fly to the Coral Club', target: { x: 29, y: 0, z: 29 }, radius: 20, text: 'Fly the helicopter to the Coral Club rooftop' },
-      { kind: 'reach', name: 'Claim the crown', target: { x: 29, y: 0, z: 29 }, radius: 16, text: 'Claim the Vice King crown' },
+      {
+        kind: 'reach',
+        objective: 'Reach the rival hideout in Old Town',
+        marker: { x: LOC.hideout.x, z: LOC.hideout.z },
+        radius: 12,
+      },
+      {
+        kind: 'timed',
+        objective: 'Plant the false evidence before the hideout crew returns',
+        marker: { x: LOC.hideout.x, z: LOC.hideout.z },
+        radius: 10,
+        timer: 90,
+      },
+      {
+        kind: 'timed',
+        objective: 'Drive the Armored Limo to the vineyard estate while the feds raid the rivals',
+        marker: { x: LOC.vineyardGate.x, z: LOC.vineyardGate.z },
+        radius: 14,
+        timer: 180,
+        vehicle: 'armoredLimo',
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.viceKingCrowned = true;
-      world.cash += 19000;
-      notify(world, 'M40 complete: Vice King crowned. +$19,000');
+      gambitFlag(world, 'evidencePlanted', true);
+      gambitFlag(world, 'gambitComplete', true);
+      note(world, 'The feds raided the rivals on your planted evidence. The Gambit paid off.');
+    },
+  },
+  {
+    id: 'M37',
+    name: 'Loaded Dice',
+    payout: 8000,
+    // Staged mission: advances only on its own trigger, NEVER auto-advance.
+    advance: false,
+    stages: [
+      {
+        kind: 'reach',
+        objective: 'Get inside the rival casino on the strip',
+        marker: { x: LOC.casino.x, z: LOC.casino.z },
+        radius: 12,
+      },
+      {
+        kind: 'timed',
+        objective: 'Rig the rival casino\'s roulette table — keep wanted at 2 stars or less',
+        marker: { x: LOC.rouletteTable.x, z: LOC.rouletteTable.z },
+        radius: 10,
+        timer: 120,
+        maxWanted: 2,
+        silent: true,
+      },
+    ],
+    onComplete(world) {
+      viceFlag(world, 'casinoRigged', true);
+      note(world, 'Rival roulette table rigged, no heat raised. Their house edge is yours now.');
+    },
+  },
+  {
+    id: 'M38',
+    name: 'High Roller',
+    payout: 13000,
+    advance: true,
+    stages: [
+      {
+        kind: 'reach',
+        objective: 'Take a seat at the high-roller table',
+        marker: { x: LOC.highRollerTable.x, z: LOC.highRollerTable.z },
+        radius: 10,
+      },
+      {
+        kind: 'timed',
+        objective: 'Win $20,000 at the high-roller table',
+        marker: { x: LOC.highRollerTable.x, z: LOC.highRollerTable.z },
+        radius: 10,
+        timer: 300,
+        winTarget: 20000,
+      },
+      {
+        kind: 'timed',
+        objective: 'Escape the rival ambush in your helicopter',
+        marker: { x: LOC.helipad.x, z: LOC.helipad.z },
+        radius: 14,
+        timer: 90,
+        heliStage: true,
+      },
+    ],
+    onComplete(world) {
+      viceFlag(world, 'highRollerWon', true);
+      note(world, '$20,000 won at the high-roller table — and out by helicopter before they could take it back.');
+    },
+  },
+  {
+    id: 'M39',
+    name: 'Havana Run',
+    payout: 15000,
+    advance: true,
+    stages: [
+      {
+        kind: 'reach',
+        objective: 'Pick up the goods in Little Havana',
+        marker: { x: LOC.littleHavana.x, z: LOC.littleHavana.z },
+        radius: 12,
+      },
+      {
+        kind: 'timed',
+        objective: 'Smuggle the goods to The Islands by boat at night',
+        marker: { x: LOC.islands.x, z: LOC.islands.z },
+        radius: 16,
+        timer: 240,
+        boatStage: true,
+        nightOnly: true,
+      },
+      {
+        kind: 'deliver',
+        objective: 'Deliver the goods to the island buyer',
+        marker: { x: LOC.islands.x, z: LOC.islands.z },
+        radius: 12,
+      },
+    ],
+    onComplete(world) {
+      viceFlag(world, 'smuggled', true);
+      note(world, 'Havana goods delivered to The Islands. The night route is yours.');
+    },
+  },
+  {
+    id: 'M40',
+    name: 'Vice King',
+    payout: 19000,
+    advance: true,
+    stages: [
+      {
+        kind: 'survive',
+        objective: 'Defend Club Neon from the rival assault',
+        marker: { x: LOC.clubNeon.x, z: LOC.clubNeon.z },
+        radius: 18,
+        timer: 120,
+        enemies: [
+          { x: 52, z: 212 }, { x: 68, z: 212 }, { x: 52, z: 228 },
+          { x: 68, z: 228 }, { x: 60, z: 205 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 52, z: 212 }, { x: 68, z: 212 }, { x: 52, z: 228 },
+            { x: 68, z: 228 }, { x: 60, z: 205 },
+          ]);
+        },
+      },
+      {
+        kind: 'timed',
+        objective: 'Fly the helicopter to the Coral Club rooftop',
+        marker: { x: LOC.coralRoof.x, z: LOC.coralRoof.z },
+        radius: 16,
+        timer: 90,
+        heliStage: true,
+      },
+      {
+        kind: 'reach',
+        objective: 'Claim the Vice King crown on the Coral Club rooftop',
+        marker: { x: LOC.coralRoof.x, z: LOC.coralRoof.z },
+        radius: 16,
+      },
+    ],
+    onComplete(world) {
+      viceFlag(world, 'viceKingCrowned', true);
+      viceFlag(world, 'viceComplete', true);
+      note(world, 'Vice King crowned on the Coral Club rooftop. The strip answers to you.');
     },
   },
 ];
 
-export function createMissions10(scene, world) {
-  const w = world || scene;
-  ensureState(w);
-  const api = {
-    name: 'missions10',
-    arc: 'vice',
-    missions: MISSIONS_37_40,
-    getMission(id) { return MISSIONS_37_40.find((m) => m.id === id) || null; },
-    start(id) {
-      const m = api.getMission(id);
-      if (!m) return null;
-      w.missionState = { id: m.id, stage: 0, objective: m.stages[0].text, marker: m.stages[0].target || null, timer: 0 };
-      notify(w, m.briefing);
-      return m;
-    },
-    advanceStage(mission, stage, dt) {
-      // `kind` is declared BEFORE any read of it (no TDZ).
-      const kind = stage.kind;
-      const pos = playerPos(w);
-      if (kind === 'reach' || kind === 'chase') {
-        return dist2d(pos, stage.target) <= (stage.radius || 12);
-      }
-      if (kind === 'maxWanted') {
-        // Fail-safe: if wanted exceeds the cap, the stage stalls (runner/HUD warns).
-        // The timer only ticks while Rico stays under the cap, so a spike
-        // does not silently bank progress.
-        if ((w.wanted || 0) > (stage.maxWanted || 2)) { stage._t = Math.max(0, (stage._t || 0) - dt); return false; }
-        stage._t = (stage._t || 0) + dt;
-        return stage._t >= (stage.duration || 20);
-      }
-      if (kind === 'casino') {
-        const s = ensureState(w);
-        return (s.casinoWinnings || 0) >= (stage.winTarget || 20000);
-      }
-      if (kind === 'nightBoat') {
-        if (!isNight(w)) return false;
-        return dist2d(pos, stage.target) <= (stage.radius || 20);
-      }
-      if (kind === 'fight') {
-        if (!stage._spawned) { spawnGuards(w, stage.enemies || [], 100); stage._spawned = true; }
-        return aliveEnemies(w).length === 0;
-      }
-      if (kind === 'defend' || kind === 'survive') {
-        if (!stage._spawned) { spawnGuards(w, stage.enemies || [], 100); stage._spawned = true; }
-        stage._t = (stage._t || 0) + dt;
-        return stage._t >= (stage.duration || 60) && aliveEnemies(w).length === 0;
-      }
-      if (kind === 'fly') {
-        if (!heliBoarded(w)) return false;
-        return dist2d(pos, stage.target) <= (stage.radius || 20);
-      }
-      return false;
-    },
-    update(dt) {
-      const ms = w.missionState;
-      if (!ms || ms.id < 37 || ms.id > 40) return;
-      const mission = api.getMission(ms.id);
-      if (!mission) return;
-      const stage = mission.stages[ms.stage];
-      if (!stage) return;
-      if (api.advanceStage(mission, stage, dt)) {
-        ms.stage += 1;
-        ms.timer = 0;
-        if (ms.stage >= mission.stages.length) {
-          if (typeof mission.onComplete === 'function') mission.onComplete(w);
-          if (!w.completedMissions.includes(mission.id)) w.completedMissions.push(mission.id);
-          w.missionState = { id: 0, stage: 0, objective: '', marker: null, timer: 0 };
-        } else {
-          const next = mission.stages[ms.stage];
-          ms.objective = next.text;
-          ms.marker = next.target || null;
-        }
-      }
-    },
-  };
-  if (Array.isArray(w.systems)) w.systems.push(api);
-  return api;
-}
+export default missions10;
 
-export default createMissions10;
+// Factory (integration): register this arc into world.missionRegistry so the
+// shared runner in missions.js can start it. Registered under both the
+// mission id ('M21') and the lowercase key ('m21') the M1-M20 factories use.
+export function createMissions10(world) {
+  world.missionRegistry = world.missionRegistry || {};
+  const R = world.missionRegistry;
+  for (const m of missions10) {
+    R[m.id] = m;
+    R[m.id.toLowerCase()] = m;
+  }
+  return R;
+}

@@ -1,206 +1,216 @@
-// missions8.js — Coral Crown arc, missions 25-28 ($40,000 total).
-// Rico takes the crown: informant, vault, betrayal, mansion rooftop.
-// Factory: createMissions8(scene, world) or createMissions8(world).
-// Every stage declares `kind` FIRST; the runner calls onComplete on finish.
+// Missions 25-28 — Coral Crown arc ($40,000 total).
+// A crown that decides who rules Solmar's underworld. Meet the informant, crack the
+// Coral Club vault, survive the betrayal, then take the crown off the rooftop in the
+// North Hills — and get out by helicopter.
+//
+// Contract: each mission is { id, name, payout, advance, stages, onComplete }.
+// Stage kinds: reach | fight | deliver | survive | tail | escort | timed.
+// The runner advances stages and calls mission.onComplete on completion; the runner
+// pays out mission.payout. Fight stages complete only when the enemy list is empty.
 
-function dist2d(a, b) {
-  const dx = (a.x || 0) - (b.x || 0);
-  const dz = (a.z || 0) - (b.z || 0);
-  return Math.sqrt(dx * dx + dz * dz);
-}
+const LOC = {
+  anchorBar: { x: -200, z: 100 },
+  northHills: { x: 150, z: -520 },
+  mansionGate: { x: 150, z: -480 },
+  mansionRoof: { x: 150, z: -520 },
+  helipad: { x: 175, z: -520 },
+  coralClub: { x: -80, z: -120 },
+  coralVault: { x: -80, z: -140 },
+  freightYard: { x: 420, z: 300 },
+  docks: { x: 480, z: 380 },
+  safehouse: { x: -150, z: -50 },
+};
 
-function playerPos(world) {
-  const p = world.player && world.player.position;
-  return p || { x: 0, y: 0, z: 0 };
-}
-
-function notify(world, text) {
-  if (!world) return;
-  if (typeof world.toast === 'function') { world.toast(text); return; }
-  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
-  if (world.hud && typeof world.hud.toast === 'function') world.hud.toast(text);
-}
-
-function ensureState(world) {
-  if (!world.crownState) {
-    world.crownState = {
-      informantMet: false, vaultCracked: false,
-      betrayalSurvived: false, donDefeated: false,
-    };
+function spawnShooters(world, list) {
+  const combat = world.systemObjects && world.systemObjects.combat;
+  if (!combat || typeof combat.spawnShooter !== 'function') return;
+  for (const spec of list) {
+    try { combat.spawnShooter(spec.x, spec.z, spec); } catch { /* combat unavailable */ }
   }
-  if (!Array.isArray(world.completedMissions)) world.completedMissions = [];
-  if (!Array.isArray(world.enemies)) world.enemies = [];
-  if (!Array.isArray(world.gangShooters)) world.gangShooters = [];
-  if (typeof world.cash !== 'number') world.cash = 0;
-  return world.crownState;
 }
 
-function spawnGuards(world, positions, health) {
-  const list = [];
-  for (const pos of positions) {
-    const enemy = {
-      position: { x: pos.x, y: 0, z: pos.z },
-      health: health || 100, maxHealth: health || 100,
-      alive: true, kind: 'gangShooter', state: 'fight',
-    };
-    if (world.combat && typeof world.combat.spawnShooter === 'function') {
-      world.combat.spawnShooter(pos, health || 100);
-    } else {
-      world.enemies.push(enemy);
-      world.gangShooters.push(enemy);
-    }
-    list.push(enemy);
-  }
-  return list;
+function flag(world, key, value) {
+  if (!world.crown) world.crown = {};
+  world.crown[key] = value;
 }
 
-function aliveEnemies(world) {
-  const list = world.enemies || [];
-  return list.filter((e) => e && e.alive !== false && (e.health === undefined || e.health > 0));
+function note(world, text) {
+  if (Array.isArray(world.events)) world.events.push({ type: 'mission', text });
 }
 
-function heliBoarded(world) {
-  const h = world.playerHeli || world.heli;
-  if (!h) return false;
-  if (typeof h.boarded === 'boolean') return h.boarded;
-  if (world.player && world.player.inHeli) return true;
-  return false;
-}
-
-export const MISSIONS_25_28 = [
+export const missions8 = [
   {
-    id: 25, name: 'The Informant', arc: 'crown', reward: 8000,
-    briefing: 'Meet the informant at the Anchor Bar, then tail his contact to the North Hills mansion.',
+    id: 'M25',
+    name: 'The Informant',
+    payout: 7000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Meet the informant', target: { x: 100, y: 0, z: 60 }, radius: 12, text: 'Meet the informant at the Anchor Bar' },
-      { kind: 'tail', name: 'Tail the contact', target: { x: 0, y: 0, z: -220 }, radius: 30, tailTime: 25, maxRange: 45, text: 'Tail the contact to the North Hills mansion' },
-      { kind: 'reach', name: 'Reach the mansion', target: { x: 0, y: 0, z: -220 }, radius: 14, text: 'Reach the North Hills mansion' },
+      {
+        kind: 'reach',
+        objective: 'Meet the informant at the Anchor Bar',
+        marker: { x: LOC.anchorBar.x, z: LOC.anchorBar.z },
+        radius: 10,
+      },
+      {
+        kind: 'tail',
+        objective: 'Tail his contact to the North Hills mansion — do not lose him',
+        marker: { x: LOC.mansionGate.x, z: LOC.mansionGate.z },
+        radius: 14,
+        timer: 240,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.informantMet = true;
-      world.cash += 8000;
-      notify(world, 'M25 complete: informant met, mansion found. +$8,000');
+      flag(world, 'informantMet', true);
+      flag(world, 'mansionLocated', true);
+      note(world, 'The contact led you to a mansion in the North Hills. The crown is there.');
     },
   },
   {
-    id: 26, name: 'The Vault', arc: 'crown', reward: 10000,
-    briefing: 'Break into the Coral Club vault with the crew. Crack it, grab the crown jewels.',
+    id: 'M26',
+    name: 'The Coral Vault',
+    payout: 9000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Reach the Coral Club', target: { x: 58, y: 0, z: 29 }, radius: 16, text: 'Reach the Coral Club tower' },
-      { kind: 'fight', name: 'Clear the vault guards', target: { x: 29, y: 0, z: 29 }, radius: 25, enemies: [{ x: 24, z: 24 }, { x: 34, z: 24 }, { x: 29, z: 34 }], text: 'Defeat the vault guards' },
-      { kind: 'reach', name: 'Crack the vault', target: { x: 29, y: 0, z: 29 }, radius: 16, text: 'Crack the Coral Club vault' },
+      {
+        kind: 'reach',
+        objective: 'Get into the Coral Club with the crew',
+        marker: { x: LOC.coralClub.x, z: LOC.coralClub.z },
+        radius: 12,
+      },
+      {
+        kind: 'fight',
+        objective: 'Take down the vault guards',
+        marker: { x: LOC.coralVault.x, z: LOC.coralVault.z },
+        radius: 18,
+        enemies: [
+          { x: -88, z: -148 }, { x: -72, z: -148 }, { x: -88, z: -132 }, { x: -72, z: -132 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: -88, z: -148 }, { x: -72, z: -148 }, { x: -88, z: -132 }, { x: -72, z: -132 },
+          ]);
+        },
+      },
+      {
+        kind: 'timed',
+        objective: 'Crack the vault before the silent alarm brings the cops',
+        marker: { x: LOC.coralVault.x, z: LOC.coralVault.z },
+        radius: 10,
+        timer: 90,
+      },
+      {
+        kind: 'deliver',
+        objective: 'Get the vault loot to the safehouse',
+        marker: { x: LOC.safehouse.x, z: LOC.safehouse.z },
+        radius: 10,
+        timer: 150,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.vaultCracked = true;
-      world.cash += 10000;
-      notify(world, 'M26 complete: vault cracked. +$10,000');
+      flag(world, 'vaultHit', true);
+      note(world, 'Coral Club vault cracked. The crew is paid — and the mansion job is funded.');
     },
   },
   {
-    id: 27, name: 'The Betrayal', arc: 'crown', reward: 10000,
-    briefing: 'Survive the betrayal ambush at the freight yard, then chase the traitor to the Docks.',
+    id: 'M27',
+    name: 'The Betrayal',
+    payout: 10000,
+    advance: true,
     stages: [
-      { kind: 'survive', name: 'Survive the ambush', target: { x: -170, y: 0, z: -260 }, radius: 30, duration: 45, enemies: [{ x: -165, z: -255 }, { x: -175, z: -255 }, { x: -170, z: -250 }], text: 'Survive the freight yard ambush' },
-      { kind: 'chase', name: 'Chase the traitor', target: { x: -215, y: 0, z: -215 }, radius: 16, text: 'Chase the traitor to the Docks' },
-      { kind: 'fight', name: 'Deal with the traitor', target: { x: -215, y: 0, z: -215 }, radius: 20, enemies: [{ x: -212, z: -212 }, { x: -218, z: -218 }], text: 'Defeat the traitor and his guards' },
+      {
+        kind: 'survive',
+        objective: 'Survive the ambush at the freight yard — someone sold you out',
+        marker: { x: LOC.freightYard.x, z: LOC.freightYard.z },
+        radius: 20,
+        timer: 90,
+        waves: 2,
+        enemies: [
+          { x: 410, z: 290 }, { x: 430, z: 290 }, { x: 410, z: 310 },
+          { x: 430, z: 310 }, { x: 420, z: 285 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 410, z: 290 }, { x: 430, z: 290 }, { x: 410, z: 310 },
+            { x: 430, z: 310 }, { x: 420, z: 285 },
+          ]);
+        },
+      },
+      {
+        kind: 'timed',
+        objective: 'Chase the traitor to the Docks before he slips away',
+        marker: { x: LOC.docks.x, z: LOC.docks.z },
+        radius: 12,
+        timer: 120,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.betrayalSurvived = true;
-      world.cash += 10000;
-      notify(world, 'M27 complete: betrayal survived, traitor dealt with. +$10,000');
+      flag(world, 'traitorChased', true);
+      flag(world, 'betrayalSurvived', true);
+      note(world, 'The traitor ran for the Docks. You know his face now — and he knows you do.');
     },
   },
   {
-    id: 28, name: 'The Crown', arc: 'crown', reward: 12000,
-    briefing: 'Storm the North Hills mansion, take the crown from the rooftop, escape by helicopter.',
+    id: 'M28',
+    name: 'The Crown',
+    payout: 14000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Reach the mansion', target: { x: 0, y: 0, z: -220 }, radius: 14, text: 'Storm the North Hills mansion' },
-      { kind: 'fight', name: 'Clear the rooftop', target: { x: 0, y: 0, z: -220 }, radius: 25, enemies: [{ x: -5, z: -215 }, { x: 5, z: -225 }, { x: 0, z: -218 }, { x: -8, z: -222 }], text: 'Defeat the rooftop guards' },
-      { kind: 'reach', name: 'Take the crown', target: { x: 0, y: 0, z: -220 }, radius: 12, text: 'Take the crown from the rooftop' },
-      { kind: 'fly', name: 'Escape by helicopter', target: { x: 29, y: 0, z: 29 }, radius: 20, text: 'Escape by helicopter to the Coral Club helipad' },
+      {
+        kind: 'reach',
+        objective: 'Storm the North Hills mansion — breach the gate',
+        marker: { x: LOC.mansionGate.x, z: LOC.mansionGate.z },
+        radius: 12,
+      },
+      {
+        kind: 'fight',
+        objective: 'Fight through the mansion guards to the rooftop stair',
+        marker: { x: LOC.northHills.x, z: LOC.northHills.z },
+        radius: 20,
+        enemies: [
+          { x: 142, z: -528 }, { x: 158, z: -528 }, { x: 142, z: -512 },
+          { x: 158, z: -512 }, { x: 150, z: -532 }, { x: 150, z: -508 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 142, z: -528 }, { x: 158, z: -528 }, { x: 142, z: -512 },
+            { x: 158, z: -512 }, { x: 150, z: -532 }, { x: 150, z: -508 },
+          ]);
+        },
+      },
+      {
+        kind: 'reach',
+        objective: 'Take the crown from the rooftop',
+        marker: { x: LOC.mansionRoof.x, z: LOC.mansionRoof.z },
+        radius: 10,
+      },
+      {
+        kind: 'timed',
+        objective: 'Escape by helicopter from the mansion helipad',
+        marker: { x: LOC.helipad.x, z: LOC.helipad.z },
+        radius: 12,
+        timer: 60,
+        heliStage: true,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.donDefeated = true;
-      world.cash += 12000;
-      notify(world, 'M28 complete: the crown is yours. +$12,000');
+      flag(world, 'crownTaken', true);
+      flag(world, 'coralCrownComplete', true);
+      note(world, 'The Coral Crown is yours. Solmar bows to a new ruler.');
     },
   },
 ];
 
-export function createMissions8(scene, world) {
-  const w = world || scene;
-  ensureState(w);
-  const api = {
-    name: 'missions8',
-    arc: 'crown',
-    missions: MISSIONS_25_28,
-    getMission(id) { return MISSIONS_25_28.find((m) => m.id === id) || null; },
-    start(id) {
-      const m = api.getMission(id);
-      if (!m) return null;
-      w.missionState = { id: m.id, stage: 0, objective: m.stages[0].text, marker: m.stages[0].target || null, timer: 0 };
-      notify(w, m.briefing);
-      return m;
-    },
-    advanceStage(mission, stage, dt) {
-      const kind = stage.kind;
-      const pos = playerPos(w);
-      if (kind === 'reach' || kind === 'chase') {
-        return dist2d(pos, stage.target) <= (stage.radius || 12);
-      }
-      if (kind === 'tail') {
-        stage._tail = (stage._tail || 0) + dt;
-        return stage._tail >= (stage.tailTime || 20) && dist2d(pos, stage.target) <= (stage.maxRange || 45);
-      }
-      if (kind === 'fight') {
-        if (!stage._spawned) { spawnGuards(w, stage.enemies || [], 100); stage._spawned = true; }
-        return aliveEnemies(w).length === 0;
-      }
-      if (kind === 'survive') {
-        if (!stage._spawned) { spawnGuards(w, stage.enemies || [], 100); stage._spawned = true; }
-        stage._t = (stage._t || 0) + dt;
-        // Survive: the timer alone clears the stage once the ambush is beaten back.
-        return stage._t >= (stage.duration || 45) && aliveEnemies(w).length === 0;
-      }
-      if (kind === 'defend') {
-        stage._t = (stage._t || 0) + dt;
-        return stage._t >= (stage.duration || 60);
-      }
-      if (kind === 'fly') {
-        // Fly stage: needs the player helicopter boarded AND near the target.
-        if (!heliBoarded(w)) return false;
-        return dist2d(pos, stage.target) <= (stage.radius || 20);
-      }
-      return false;
-    },
-    update(dt) {
-      const ms = w.missionState;
-      if (!ms || ms.id < 25 || ms.id > 28) return;
-      const mission = api.getMission(ms.id);
-      if (!mission) return;
-      const stage = mission.stages[ms.stage];
-      if (!stage) return;
-      if (api.advanceStage(mission, stage, dt)) {
-        ms.stage += 1;
-        ms.timer = 0;
-        if (ms.stage >= mission.stages.length) {
-          if (typeof mission.onComplete === 'function') mission.onComplete(w);
-          if (!w.completedMissions.includes(mission.id)) w.completedMissions.push(mission.id);
-          w.missionState = { id: 0, stage: 0, objective: '', marker: null, timer: 0 };
-        } else {
-          const next = mission.stages[ms.stage];
-          ms.objective = next.text;
-          ms.marker = next.target || null;
-        }
-      }
-    },
-  };
-  if (Array.isArray(w.systems)) w.systems.push(api);
-  return api;
-}
+export default missions8;
 
-export default createMissions8;
+// Factory (integration): register this arc into world.missionRegistry so the
+// shared runner in missions.js can start it. Registered under both the
+// mission id ('M21') and the lowercase key ('m21') the M1-M20 factories use.
+export function createMissions8(world) {
+  world.missionRegistry = world.missionRegistry || {};
+  const R = world.missionRegistry;
+  for (const m of missions8) {
+    R[m.id] = m;
+    R[m.id.toLowerCase()] = m;
+  }
+  return R;
+}

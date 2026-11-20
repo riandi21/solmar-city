@@ -1,190 +1,208 @@
-// missions7.js — Dourado Revenge arc, missions 21-24 ($35,000 total).
-// Rico hunts the Dourado family that betrayed the Coral empire.
-// Factory: createMissions7(scene, world) or createMissions7(world).
-// Every stage declares `kind` FIRST and never reads a const before it.
-// The mission runner calls mission.onComplete when a mission finishes;
-// onComplete sets the revenge arc flags and pays the reward.
+// Missions 21-24 — Dourado Revenge arc ($35,000 total).
+// The Dourado family wiped out the player's first crew. Four hits to pay it back:
+// tail the courier, raid the warehouse, ambush the convoy, storm the Don's penthouse.
+//
+// Contract: each mission is { id, name, payout, advance, stages, onComplete }.
+// Stage kinds: reach | fight | deliver | survive | tail | escort | timed.
+// The runner advances stages and calls mission.onComplete on completion; the runner
+// pays out mission.payout. Fight stages complete only when the enemy list is empty,
+// so onEnter spawns shooters through world.systemObjects.combat (guarded).
 
-function dist2d(a, b) {
-  const dx = (a.x || 0) - (b.x || 0);
-  const dz = (a.z || 0) - (b.z || 0);
-  return Math.sqrt(dx * dx + dz * dz);
-}
+const LOC = {
+  freightYard: { x: 420, z: 300 },
+  docks: { x: 480, z: 380 },
+  docksWarehouse: { x: 505, z: 355 },
+  warehouse: { x: 380, z: 180 },
+  safehouse: { x: -150, z: -50 },
+  highway: { x: 200, z: 250 },
+  highwayAmbush: { x: 240, z: 290 },
+  penthouse: { x: 40, z: -40 },
+  downtown: { x: 0, z: 0 },
+};
 
-function playerPos(world) {
-  const p = world.player && world.player.position;
-  return p || { x: 0, y: 0, z: 0 };
-}
-
-function notify(world, text) {
-  if (!world) return;
-  if (typeof world.toast === 'function') { world.toast(text); return; }
-  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
-  if (world.hud && typeof world.hud.toast === 'function') world.hud.toast(text);
-}
-
-function ensureState(world) {
-  if (!world.revengeState) {
-    world.revengeState = {
-      courierTailed: false, warehouseRaided: false,
-      convoyAmbushed: false, donDefeated: false,
-    };
+function spawnShooters(world, list) {
+  const combat = world.systemObjects && world.systemObjects.combat;
+  if (!combat || typeof combat.spawnShooter !== 'function') return;
+  for (const spec of list) {
+    try { combat.spawnShooter(spec.x, spec.z, spec); } catch { /* combat unavailable */ }
   }
-  if (!Array.isArray(world.completedMissions)) world.completedMissions = [];
-  if (!Array.isArray(world.enemies)) world.enemies = [];
-  if (!Array.isArray(world.gangShooters)) world.gangShooters = [];
-  if (typeof world.cash !== 'number') world.cash = 0;
-  return world.revengeState;
 }
 
-function spawnGuards(world, positions, health) {
-  const list = [];
-  for (const pos of positions) {
-    const enemy = {
-      position: { x: pos.x, y: 0, z: pos.z },
-      health: health || 100, maxHealth: health || 100,
-      alive: true, kind: 'gangShooter', state: 'fight',
-    };
-    if (world.combat && typeof world.combat.spawnShooter === 'function') {
-      world.combat.spawnShooter(pos, health || 100);
-    } else {
-      world.enemies.push(enemy);
-      world.gangShooters.push(enemy);
-    }
-    list.push(enemy);
-  }
-  return list;
+function flag(world, key, value) {
+  if (!world.revenge) world.revenge = {};
+  world.revenge[key] = value;
 }
 
-function aliveEnemies(world) {
-  const list = world.enemies || [];
-  return list.filter((e) => e && e.alive !== false && (e.health === undefined || e.health > 0));
+function note(world, text) {
+  if (Array.isArray(world.events)) world.events.push({ type: 'mission', text });
 }
 
-export const MISSIONS_21_24 = [
+export const missions7 = [
   {
-    id: 21, name: 'The Courier', arc: 'revenge', reward: 6000,
-    briefing: 'Tail the Dourado courier from the freight yard to the Docks. Stay close, stay unseen.',
+    id: 'M21',
+    name: 'The Courier',
+    payout: 6000,
+    advance: true,
     stages: [
-      { kind: 'tail', name: 'Tail the courier', target: { x: -215, y: 0, z: -215 }, radius: 30, tailTime: 25, maxRange: 45, text: 'Tail the courier to the Docks warehouse' },
-      { kind: 'reach', name: 'Reach the warehouse', target: { x: -215, y: 0, z: -215 }, radius: 12, text: 'Reach the Docks warehouse' },
+      {
+        kind: 'reach',
+        objective: 'Find the Dourado courier at the freight yard',
+        marker: { x: LOC.freightYard.x, z: LOC.freightYard.z },
+        radius: 12,
+      },
+      {
+        kind: 'tail',
+        objective: 'Tail the courier to the Docks warehouse — stay back, do not get spotted',
+        marker: { x: LOC.docksWarehouse.x, z: LOC.docksWarehouse.z },
+        radius: 14,
+        timer: 180,
+      },
+      {
+        kind: 'reach',
+        objective: 'Photograph the handoff from cover',
+        marker: { x: LOC.docks.x, z: LOC.docks.z },
+        radius: 10,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.courierTailed = true;
-      world.cash += 6000;
-      notify(world, 'M21 complete: courier tailed. +$6,000');
+      flag(world, 'courierTailed', true);
+      note(world, 'Dourado courier tailed — the warehouse and the convoy route are exposed.');
     },
   },
   {
-    id: 22, name: 'Warehouse Raid', arc: 'revenge', reward: 8000,
-    briefing: 'Raid the Dourado warehouse at the Docks. Clear the guards, grab the ledger.',
+    id: 'M22',
+    name: 'The Warehouse',
+    payout: 8000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Reach the warehouse', target: { x: -215, y: 0, z: -215 }, radius: 14, text: 'Reach the Dourado warehouse' },
-      { kind: 'fight', name: 'Clear the guards', target: { x: -215, y: 0, z: -215 }, radius: 25, enemies: [{ x: -210, z: -210 }, { x: -220, z: -210 }, { x: -215, z: -220 }, { x: -205, z: -215 }], text: 'Defeat the warehouse guards' },
-      { kind: 'reach', name: 'Grab the ledger', target: { x: -215, y: 0, z: -215 }, radius: 8, text: 'Grab the Dourado ledger' },
+      {
+        kind: 'reach',
+        objective: 'Reach the Dourado warehouse on the east side',
+        marker: { x: LOC.warehouse.x, z: LOC.warehouse.z },
+        radius: 12,
+      },
+      {
+        kind: 'fight',
+        objective: 'Clear the warehouse guards',
+        marker: { x: LOC.warehouse.x, z: LOC.warehouse.z },
+        radius: 20,
+        enemies: [
+          { x: 372, z: 172 }, { x: 388, z: 172 }, { x: 372, z: 188 },
+          { x: 388, z: 188 }, { x: 380, z: 165 }, { x: 380, z: 195 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 372, z: 172 }, { x: 388, z: 172 }, { x: 372, z: 188 },
+            { x: 388, z: 188 }, { x: 380, z: 165 }, { x: 380, z: 195 },
+          ]);
+        },
+      },
+      {
+        kind: 'deliver',
+        objective: 'Take the stolen ledger back to the safehouse',
+        marker: { x: LOC.safehouse.x, z: LOC.safehouse.z },
+        radius: 10,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.warehouseRaided = true;
-      world.cash += 8000;
-      notify(world, 'M22 complete: warehouse raided, ledger stolen. +$8,000');
+      flag(world, 'warehouseRaided', true);
+      note(world, 'Dourado warehouse raided — the ledger names every buyer on the convoy route.');
     },
   },
   {
-    id: 23, name: 'Convoy Ambush', arc: 'revenge', reward: 9000,
-    briefing: 'Ambush the Dourado convoy on the north road. Stop the trucks, take the cash.',
+    id: 'M23',
+    name: 'The Convoy',
+    payout: 9000,
+    advance: true,
     stages: [
-      { kind: 'chase', name: 'Chase the convoy', target: { x: 0, y: 0, z: -232 }, radius: 18, text: 'Catch the convoy on the north road' },
-      { kind: 'fight', name: 'Stop the convoy', target: { x: 0, y: 0, z: -232 }, radius: 25, enemies: [{ x: -5, z: -228 }, { x: 5, z: -236 }, { x: 0, z: -224 }], text: 'Defeat the convoy guards' },
-      { kind: 'reach', name: 'Take the cash', target: { x: 0, y: 0, z: -232 }, radius: 10, text: 'Collect the convoy cash' },
+      {
+        kind: 'reach',
+        objective: 'Get to the ambush point on the highway',
+        marker: { x: LOC.highwayAmbush.x, z: LOC.highwayAmbush.z },
+        radius: 12,
+      },
+      {
+        kind: 'fight',
+        objective: 'Ambush the convoy escort and take the trucks',
+        marker: { x: LOC.highway.x, z: LOC.highway.z },
+        radius: 22,
+        enemies: [
+          { x: 195, z: 245 }, { x: 205, z: 255 }, { x: 190, z: 258 }, { x: 210, z: 242 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 195, z: 245 }, { x: 205, z: 255 }, { x: 190, z: 258 }, { x: 210, z: 242 },
+          ]);
+        },
+      },
+      {
+        kind: 'deliver',
+        objective: 'Drive the seized goods to the safehouse',
+        marker: { x: LOC.safehouse.x, z: LOC.safehouse.z },
+        radius: 10,
+        timer: 150,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.convoyAmbushed = true;
-      world.cash += 9000;
-      notify(world, 'M23 complete: convoy ambushed. +$9,000');
+      flag(world, 'convoyHit', true);
+      note(world, 'Dourado convoy hit — their supply line is cut and the Don is exposed.');
     },
   },
   {
-    id: 24, name: "The Don's Penthouse", arc: 'revenge', reward: 12000,
-    briefing: 'Storm the Dourado Don\'s penthouse at the Coral Club. End the family.',
+    id: 'M24',
+    name: "The Don's Penthouse",
+    payout: 12000,
+    advance: true,
     stages: [
-      { kind: 'reach', name: 'Reach the Coral Club', target: { x: 58, y: 0, z: 29 }, radius: 16, text: 'Reach the Coral Club tower' },
-      { kind: 'fight', name: 'Storm the penthouse', target: { x: 29, y: 0, z: 29 }, radius: 25, enemies: [{ x: 24, z: 24 }, { x: 34, z: 24 }, { x: 24, z: 34 }, { x: 34, z: 34 }, { x: 29, z: 29 }], text: 'Defeat the Don\'s guards' },
-      { kind: 'reach', name: 'Confront the Don', target: { x: 29, y: 0, z: 29 }, radius: 16, text: 'Confront the Dourado Don' },
+      {
+        kind: 'reach',
+        objective: 'Storm the downtown tower — reach the penthouse elevator',
+        marker: { x: LOC.penthouse.x, z: LOC.penthouse.z },
+        radius: 12,
+      },
+      {
+        kind: 'fight',
+        objective: 'Fight through the Don\'s personal guard',
+        marker: { x: LOC.penthouse.x, z: LOC.penthouse.z },
+        radius: 20,
+        enemies: [
+          { x: 32, z: -48 }, { x: 48, z: -48 }, { x: 32, z: -32 },
+          { x: 48, z: -32 }, { x: 40, z: -52 }, { x: 40, z: -28 },
+        ],
+        onEnter(world) {
+          spawnShooters(world, [
+            { x: 32, z: -48 }, { x: 48, z: -48 }, { x: 32, z: -32 },
+            { x: 48, z: -32 }, { x: 40, z: -52 }, { x: 40, z: -28 },
+          ]);
+        },
+      },
+      {
+        kind: 'survive',
+        objective: 'Hold the penthouse while the Don\'s last men rush you',
+        marker: { x: LOC.penthouse.x, z: LOC.penthouse.z },
+        radius: 16,
+        timer: 60,
+      },
     ],
     onComplete(world) {
-      const s = ensureState(world);
-      s.donDefeated = true;
-      world.cash += 12000;
-      notify(world, 'M24 complete: Dourado Don defeated. Revenge done. +$12,000');
+      flag(world, 'donDown', true);
+      flag(world, 'revengeComplete', true);
+      note(world, 'The Don is finished. The Dourado Revenge is complete — Solmar is yours to take.');
     },
   },
 ];
 
-export function createMissions7(scene, world) {
-  const w = world || scene;
-  ensureState(w);
-  const api = {
-    name: 'missions7',
-    arc: 'revenge',
-    missions: MISSIONS_21_24,
-    getMission(id) { return MISSIONS_21_24.find((m) => m.id === id) || null; },
-    start(id) {
-      const m = api.getMission(id);
-      if (!m) return null;
-      w.missionState = { id: m.id, stage: 0, objective: m.stages[0].text, marker: m.stages[0].target || null, timer: 0 };
-      notify(w, m.briefing);
-      return m;
-    },
-    // Advance one stage for the active mission; returns true when a stage advanced.
-    advanceStage(mission, stage, dt) {
-      const kind = stage.kind;
-      const pos = playerPos(w);
-      if (kind === 'reach' || kind === 'chase') {
-        return dist2d(pos, stage.target) <= (stage.radius || 12);
-      }
-      if (kind === 'tail') {
-        stage._tail = (stage._tail || 0) + dt;
-        // Tail fails back to the start if Rico falls too far behind.
-        if (dist2d(pos, stage.target) > (stage.maxRange || 45) * 1.5) stage._tail = 0;
-        return stage._tail >= (stage.tailTime || 20) && dist2d(pos, stage.target) <= (stage.maxRange || 45);
-      }
-      if (kind === 'fight') {
-        if (!stage._spawned) { spawnGuards(w, stage.enemies || [], 100); stage._spawned = true; }
-        return aliveEnemies(w).length === 0;
-      }
-      if (kind === 'defend' || kind === 'survive') {
-        stage._t = (stage._t || 0) + dt;
-        return stage._t >= (stage.duration || 60);
-      }
-      return false;
-    },
-    update(dt) {
-      const ms = w.missionState;
-      if (!ms || ms.id < 21 || ms.id > 24) return;
-      const mission = api.getMission(ms.id);
-      if (!mission) return;
-      const stage = mission.stages[ms.stage];
-      if (!stage) return;
-      if (api.advanceStage(mission, stage, dt)) {
-        ms.stage += 1;
-        ms.timer = 0;
-        if (ms.stage >= mission.stages.length) {
-          if (typeof mission.onComplete === 'function') mission.onComplete(w);
-          if (!w.completedMissions.includes(mission.id)) w.completedMissions.push(mission.id);
-          w.missionState = { id: 0, stage: 0, objective: '', marker: null, timer: 0 };
-        } else {
-          const next = mission.stages[ms.stage];
-          ms.objective = next.text;
-          ms.marker = next.target || null;
-        }
-      }
-    },
-  };
-  if (Array.isArray(w.systems)) w.systems.push(api);
-  return api;
-}
+export default missions7;
 
-export default createMissions7;
+// Factory (integration): register this arc into world.missionRegistry so the
+// shared runner in missions.js can start it. Registered under both the
+// mission id ('M21') and the lowercase key ('m21') the M1-M20 factories use.
+export function createMissions7(world) {
+  world.missionRegistry = world.missionRegistry || {};
+  const R = world.missionRegistry;
+  for (const m of missions7) {
+    R[m.id] = m;
+    R[m.id.toLowerCase()] = m;
+  }
+  return R;
+}

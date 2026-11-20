@@ -1,184 +1,182 @@
-// Properties — the six buyable businesses of Solmar City.
-// Rico visits a property marker and presses B to buy it. Each owned
-// property pays passive income every in-game hour, shows as owned on the
-// minimap/HUD, and persists in the save (world.properties).
-// Factory: createProperties(scene, world) or createProperties(world).
-// Never overwrites world state fields: world.properties stays plain data.
+// Properties: six buyable businesses / homes in Solmar City.
+// Press B at a property marker to buy it (once per press). Owned
+// properties pay passive income every in-game hour, show on the
+// minimap/HUD, persist in the save, and unlock perks elsewhere:
+// garage = free tire repair, depot = +25% taxi fares, bar = mission
+// hints + crew hire / bribes, Club Neon = dance floor, Surf Shack =
+// free jet-ski rental + a better fishing rod.
 
 export const PROPERTY_DEFS = [
-  { id: 'garage', name: "Rico's Garage", price: 2000, incomePerHour: 50, x: -150, z: 200, perk: 'Free tire repairs' },
-  { id: 'bar', name: 'Anchor Bar', price: 5000, incomePerHour: 120, x: 100, z: 60, perk: 'Hire crew, pay bribes, mission hints' },
-  { id: 'depot', name: 'Coral Taxi Depot', price: 8000, incomePerHour: 200, x: 80, z: 140, perk: '+25% taxi fares' },
-  { id: 'beachhouse', name: 'Beachfront House', price: 12000, incomePerHour: 300, x: 30, z: 280, perk: 'Safehouse on the boardwalk' },
-  { id: 'neon', name: 'Club Neon', price: 15000, incomePerHour: 400, x: 120, z: 90, perk: 'Dance floor tips' },
-  { id: 'surfshack', name: 'Surf Shack', price: 10000, incomePerHour: 150, x: -180, z: 300, perk: 'Free jet ski rental, better fishing rod' },
+  { key: 'garage', name: "Rico's Garage", price: 2000, x: -150, z: 200, incomePerHour: 50, blurb: 'Free tire repairs.' },
+  { key: 'bar', name: 'Anchor Bar', price: 5000, x: 100, z: 60, incomePerHour: 120, blurb: 'Crew hire, bribes, mission hints.' },
+  { key: 'depot', name: 'Coral Taxi Depot', price: 8000, x: 80, z: 140, incomePerHour: 200, blurb: '+25% taxi fares.' },
+  { key: 'beachHouse', name: 'Beachfront House', price: 12000, x: 30, z: 280, incomePerHour: 300, blurb: 'Safehouse on the beach.' },
+  { key: 'neon', name: 'Club Neon', price: 15000, x: 120, z: 90, incomePerHour: 400, blurb: 'Dance floor tips.' },
+  { key: 'surf', name: 'Surf Shack', price: 10000, x: -180, z: 300, incomePerHour: 150, blurb: 'Free jet skis, better fishing rod.' },
 ];
 
-export const PROPERTIES = PROPERTY_DEFS;
+const HOUR_SECONDS = 60; // one in-game hour = 60 real seconds
+const BUY_RADIUS = 7;
+const DANCE_RADIUS = 9;
 
-function normalizeArgs(scene, world) {
-  if (world === undefined || world === null) {
-    // Called as createProperties(world).
-    if (scene && (typeof scene.cash === 'number' || scene.player || scene.properties)) return { scene: null, world: scene };
-    return { scene: null, world: scene || {} };
-  }
-  return { scene, world };
+function posOf(world) {
+  const p = world.player || {};
+  const q = p.position || p;
+  return { x: Number(q.x ?? p.x ?? 0), z: Number(q.z ?? p.z ?? q.y ?? p.y ?? 0) };
 }
 
-function playerPos(world) {
-  const p = world.player;
-  if (!p) return null;
-  if (p.position && typeof p.position.x === 'number') return { x: p.position.x, z: p.position.z || 0 };
-  if (typeof p.x === 'number') return { x: p.x, z: p.z || 0 };
-  return null;
+function cashOf(world) {
+  return Number(world.cash ?? world.player?.cash ?? 0);
+}
+
+function setCash(world, value) {
+  const v = Math.max(0, Math.floor(value));
+  world.cash = v;
+  if (world.player) world.player.cash = v;
+  return v;
 }
 
 function toast(world, text) {
-  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
-  else if (typeof world.toast === 'function') world.toast(text);
-  else if (Array.isArray(world.messages)) world.messages.push(text);
+  if (typeof world.addToast === 'function') { world.addToast(text); return; }
+  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text, message: text });
 }
 
-function keyDown(world, key) {
-  const input = world.input;
-  if (!input) return false;
-  if (input.pressed && typeof input.pressed.has === 'function') return input.pressed.has(key);
-  if (input.keys && typeof input.keys.has === 'function') return input.keys.has(key);
-  if (input[key] === true) return true;
+function keyDown(world, ...codes) {
+  const keys = world.input?.keys;
+  if (!keys) return false;
+  for (const c of codes) if (keys.has(c)) return true;
   return false;
 }
 
-export function createProperties(scene, world) {
-  const args = normalizeArgs(scene, world);
-  scene = args.scene;
-  world = args.world;
+function dist(a, b) {
+  const dx = a.x - b.x, dz = a.z - b.z;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 
-  if (!world.properties || typeof world.properties !== 'object') {
-    world.properties = { owned: {}, income: 0, totalEarned: 0, lastPayoutHour: 0 };
-  }
-  if (!world.properties.owned || typeof world.properties.owned !== 'object') world.properties.owned = {};
-  if (typeof world.properties.totalEarned !== 'number') world.properties.totalEarned = 0;
-  if (typeof world.cash !== 'number') world.cash = 0;
-  if (!world.kingpin) world.kingpin = {};
+export function createProperties(world) {
+  if (!world.properties || typeof world.properties !== 'object') world.properties = {};
+  const store = world.properties;
+  if (!store.owned || typeof store.owned !== 'object') store.owned = {};
+  if (typeof store.income !== 'number') store.income = 0;
+  if (typeof store.lastPayout !== 'number') store.lastPayout = 0;
 
-  const state = world.properties;
-  let hoursBanked = 0;
+  let hourTimer = 0;
   let prevB = false;
-  let markers = [];
+  let prevE = false;
+  let danceCooldown = 0;
 
-  // Visual markers: only when a real THREE is handed to us; headless runs
-  // (and the systems test) get plain marker records instead, never a crash.
-  const THREE = world.THREE || (typeof window !== 'undefined' ? window.THREE : null);
-  if (scene && typeof scene.add === 'function' && THREE) {
-    for (const def of PROPERTY_DEFS) {
-      const mat = new THREE.MeshBasicMaterial({ color: state.owned[def.id] ? 0x37d67a : 0xf2c94c });
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(2.4, 3.2, 0.4), mat);
-      mesh.position.set(def.x, 2.2, def.z);
-      scene.add(mesh);
-      markers.push({ def, mesh, x: def.x, z: def.z, owned: !!state.owned[def.id] });
+  function isOwned(name) {
+    const def = PROPERTY_DEFS.find((d) => d.key === name || d.name === name);
+    const key = def ? def.key : name;
+    return Boolean(store.owned[key]);
+  }
+
+  function ownedList() {
+    return PROPERTY_DEFS.filter((d) => store.owned[d.key]);
+  }
+
+  function buyProperty(name) {
+    const def = PROPERTY_DEFS.find((d) => d.key === name || d.name === name);
+    if (!def) { toast(world, 'No such property.'); return false; }
+    if (store.owned[def.key]) { toast(world, def.name + ' is already yours.'); return false; }
+    if (cashOf(world) < def.price) {
+      toast(world, 'Not enough cash for ' + def.name + ' ($' + def.price + ').');
+      return false;
     }
-  } else {
-    markers = PROPERTY_DEFS.map((def) => ({ def, mesh: null, x: def.x, z: def.z, owned: !!state.owned[def.id] }));
+    setCash(world, cashOf(world) - def.price);
+    store.owned[def.key] = true;
+    toast(world, 'Bought ' + def.name + ' for $' + def.price + '! Pays $' + def.incomePerHour + '/hr.');
+    return true;
   }
 
-  function ownedIds() {
-    return PROPERTY_DEFS.filter((d) => state.owned[d.id]).map((d) => d.id);
+  function nearestMarker() {
+    const p = posOf(world);
+    let best = null, bestD = Infinity;
+    for (const def of PROPERTY_DEFS) {
+      const d = dist(p, def);
+      if (d < bestD) { bestD = d; best = def; }
+    }
+    return bestD <= BUY_RADIUS ? best : null;
   }
 
-  function isOwned(id) {
-    return !!state.owned[id];
-  }
-
-  function incomePerHour() {
+  function payHourlyIncome() {
+    const owned = ownedList();
+    if (!owned.length) return;
     let total = 0;
-    for (const def of PROPERTY_DEFS) if (state.owned[def.id]) total += def.incomePerHour;
-    return total;
+    for (const def of owned) total += def.incomePerHour;
+    if (total <= 0) return;
+    setCash(world, cashOf(world) + total);
+    store.income = (store.income || 0) + total;
+    store.lastPayout = Number(world.elapsed || 0);
+    toast(world, 'Property income: +$' + total + ' (' + owned.map((d) => d.name).join(', ') + ').');
   }
 
-  function nearest(x, z, maxDist) {
-    let best = null;
-    let bestDist = maxDist === undefined ? Infinity : maxDist;
-    for (const def of PROPERTY_DEFS) {
-      const d = Math.hypot(def.x - x, def.z - z);
-      if (d < bestDist) { bestDist = d; best = def; }
-    }
-    return best ? { def: best, distance: bestDist } : null;
-  }
-
-  function buy(id) {
-    const def = PROPERTY_DEFS.find((d) => d.id === id);
-    if (!def) return { ok: false, reason: 'unknown property' };
-    if (state.owned[def.id]) return { ok: false, reason: 'already owned' };
-    if (world.cash < def.price) return { ok: false, reason: 'not enough cash' };
-    world.cash -= def.price;
-    state.owned[def.id] = true;
-    for (const m of markers) if (m.def.id === def.id) m.owned = true;
-    refreshMarkerColors();
-    toast(world, `Bought ${def.name} for $${def.price} — earns $${def.incomePerHour}/hr. ${def.perk}`);
-    if (Array.isArray(world.events)) world.events.push({ type: 'property-bought', id: def.id });
-    return { ok: true, def };
-  }
-
-  // Back-compat alias used by older callers.
-  function tryBuy(id) { return buy(id); }
-
-  function refreshMarkerColors() {
-    if (!THREE) return;
-    for (const m of markers) {
-      if (m.mesh && m.mesh.material) m.mesh.material.color.setHex(m.owned ? 0x37d67a : 0xf2c94c);
-    }
+  function tryDance() {
+    if (!isOwned('neon')) return;
+    if (danceCooldown > 0) return;
+    const p = posOf(world);
+    const club = PROPERTY_DEFS.find((d) => d.key === 'neon');
+    if (dist(p, club) > DANCE_RADIUS) return;
+    danceCooldown = 5;
+    const tip = 5 + Math.floor(Math.random() * 21); // $5-$25 in tips
+    setCash(world, cashOf(world) + tip);
+    toast(world, 'You dance at Club Neon — the crowd tips you $' + tip + '!');
   }
 
   function update(dt) {
-    // Passive income: one payout per owned-property-hour.
-    const rate = incomePerHour();
-    if (rate > 0 && dt > 0) {
-      hoursBanked += dt / 3600;
-      if (hoursBanked >= 1) {
-        const hours = Math.floor(hoursBanked);
-        hoursBanked -= hours;
-        const payout = rate * hours;
-        world.cash += payout;
-        state.income = (state.income || 0) + payout;
-        state.totalEarned += payout;
-        toast(world, `Property income: +$${payout}`);
+    const step = Math.max(0, Number(dt) || 0);
+    if (danceCooldown > 0) danceCooldown -= step;
+
+    // Passive income: one payout per in-game hour while owning anything.
+    if (ownedList().length) {
+      hourTimer += step;
+      if (hourTimer >= HOUR_SECONDS) {
+        hourTimer -= HOUR_SECONDS;
+        payHourlyIncome();
       }
+    } else {
+      hourTimer = 0;
     }
-    // B to buy, edge-triggered, near a for-sale marker.
-    const bDown = keyDown(world, 'KeyB') || keyDown(world, 'b') || keyDown(world, 'B');
-    const pos = playerPos(world);
-    if (bDown && !prevB && pos) {
-      const near = nearest(pos.x, pos.z, 7);
-      if (near && !state.owned[near.def.id]) {
-        const result = buy(near.def.id);
-        if (!result.ok && result.reason === 'not enough cash') {
-          toast(world, `${near.def.name} costs $${near.def.price} — you have $${world.cash}`);
-        }
-      }
+
+    const bDown = keyDown(world, 'KeyB', 'b', 'B');
+    if (bDown && !prevB) {
+      const near = nearestMarker();
+      if (near) buyProperty(near.key);
     }
     prevB = bDown;
+
+    const eDown = keyDown(world, 'KeyE', 'e', 'E');
+    if (eDown && !prevE) tryDance();
+    prevE = eDown;
   }
 
-  const system = {
-    defs: PROPERTY_DEFS,
-    definitions: PROPERTY_DEFS,
-    list: PROPERTY_DEFS,
-    markers,
-    owned: ownedIds,
-    ownedIds,
-    isOwned,
-    buy,
-    tryBuy,
-    nearest,
-    incomePerHour,
-    forSale: () => PROPERTY_DEFS.filter((d) => !state.owned[d.id]),
-    ownedCount: () => ownedIds().length,
-    hudLines: () => PROPERTY_DEFS.filter((d) => state.owned[d.id]).map((d) => `${d.name}: $${d.incomePerHour}/hr`),
-    refreshMarkerColors,
-    update,
-  };
-  if (Array.isArray(world.systems) && !world.systems.includes(system.update)) world.systems.push(system.update);
-  return system;
-}
+  // Total passive income per in-game hour from everything owned now.
+  function hourlyIncome() {
+    let total = 0;
+    for (const def of ownedList()) total += def.incomePerHour;
+    return total;
+  }
 
-export default createProperties;
+  // Perks other systems read (guarded via world.systemObjects.properties).
+  function taxiBonus() { return isOwned('depot') ? 0.25 : 0; }
+  function hasBetterRod() { return isOwned('surf'); }
+  function freeTireRepair() { return isOwned('garage'); }
+  function missionHint() {
+    if (!isOwned('bar')) return '';
+    return 'Anchor Bar regulars whisper: check the next mission marker — the crew is ready when you are.';
+  }
+
+  return {
+    update,
+    buyProperty,
+    isOwned,
+    list: () => PROPERTY_DEFS.map((d) => ({ ...d, owned: Boolean(store.owned[d.key]) })),
+    owned: ownedList,
+    hourlyIncome,
+    taxiBonus,
+    hasBetterRod,
+    freeTireRepair,
+    missionHint,
+    nearest: nearestMarker,
+  };
+}

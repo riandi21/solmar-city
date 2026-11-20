@@ -1,233 +1,135 @@
-// Old Town — the historic quarter around (-203, -87) and (-203, -29): old
-// brick buildings around a plaza with a fountain, and the lighthouse with a
-// rotating beam on the south-west beach at (-270, 300).
+// oldtown.js — Old town district around blocks (-203,-87) and (-203,-29), with a plaza.
+// The lighthouse stands at (-270,300) on the SW beach (sea starts ~z 330) and its
+// beam rotates in update().
 import * as THREE from 'three';
 
+function mat(color, roughness = 0.9) {
+  return new THREE.MeshStandardMaterial({ color, roughness, metalness: 0.05 });
+}
+
+function box(scene, colliders, w, h, d, x, y, z, material, collide = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  if (collide) colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 });
+  return m;
+}
+
 export function createOldTown(scene, world) {
-  const rng = typeof world.rng === 'function' ? world.rng : Math.random;
+  if (!world.city) world.city = { colliders: [] };
+  if (!world.city.colliders) world.city.colliders = [];
+  const colliders = world.city.colliders;
+  const rng = () => world.rng();
   const group = new THREE.Group();
-  group.name = 'OldTown';
+  group.name = 'oldtown';
   scene.add(group);
-  const colliders = [];
-  let beam = null;
-  let beamLight = null;
 
-  function addCollider(x, z, w, d) {
-    const c = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 };
-    colliders.push(c);
-    return c;
-  }
-
-  function box(x, y, z, w, h, d, color, collide = false) {
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(w, h, d),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.95 })
-    );
-    mesh.position.set(x, y + h / 2, z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-    if (collide) addCollider(x, z, w, d);
-    return mesh;
-  }
-
-  // Plaza: a round stone square with a fountain at its heart.
-  const plaza = new THREE.Mesh(
-    new THREE.CylinderGeometry(20, 20, 0.4, 24),
-    new THREE.MeshStandardMaterial({ color: 0xb8ac96, roughness: 1 })
-  );
-  plaza.position.set(-203, 0.2, -58);
+  // Cobble plaza between the two blocks.
+  const plaza = new THREE.Mesh(new THREE.BoxGeometry(46, 0.3, 34), mat(0xb0a890));
+  plaza.position.set(-203, 0.15, -58);
   plaza.receiveShadow = true;
   group.add(plaza);
-  const basin = new THREE.Mesh(
-    new THREE.CylinderGeometry(5, 5.6, 1.2, 16),
-    new THREE.MeshStandardMaterial({ color: 0x8a8578, roughness: 1 })
-  );
-  basin.position.set(-203, 0.8, -58);
-  group.add(basin);
-  const water = new THREE.Mesh(
-    new THREE.CylinderGeometry(4.4, 4.4, 0.3, 16),
-    new THREE.MeshStandardMaterial({ color: 0x3a9ad8, roughness: 0.2 })
-  );
-  water.position.set(-203, 1.3, -58);
+  const fountain = new THREE.Mesh(new THREE.CylinderGeometry(4, 4.6, 1.2, 12), mat(0x9a9a92));
+  fountain.position.set(-203, 0.9, -58);
+  group.add(fountain);
+  const water = new THREE.Mesh(new THREE.CylinderGeometry(3.4, 3.4, 0.4, 12),
+    new THREE.MeshStandardMaterial({ color: 0x3fa8c8, roughness: 0.15 }));
+  water.position.set(-203, 1.4, -58);
   group.add(water);
-  const spout = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.5, 0.8, 2.4, 8),
-    new THREE.MeshStandardMaterial({ color: 0x9a938a, roughness: 1 })
-  );
-  spout.position.set(-203, 1.8, -58);
+  const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 2.2, 8), mat(0x8d8d85));
+  spout.position.set(-203, 2.2, -58);
   group.add(spout);
-  addCollider(-203, -58, 11, 11);
+  colliders.push({ minX: -208, maxX: -198, minZ: -63, maxZ: -53 });
 
-  // Benches and lamps around the plaza.
-  for (let i = 0; i < 8; i += 1) {
-    const a = (i / 8) * Math.PI * 2;
-    const x = -203 + Math.cos(a) * 15;
-    const z = -58 + Math.sin(a) * 15;
-    box(x, 0.4, z, 2.6, 0.5, 0.9, 0x6a4a2a, true);
-    const pole = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12, 0.12, 4.5, 6),
-      new THREE.MeshStandardMaterial({ color: 0x222222 })
-    );
-    pole.position.set(x + 2.5, 2.6, z);
-    group.add(pole);
-    const lamp = new THREE.Mesh(
-      new THREE.SphereGeometry(0.32, 8, 6),
-      new THREE.MeshStandardMaterial({ color: 0xffe9a8, emissive: 0xffdf80, emissiveIntensity: 0.9 })
-    );
-    lamp.position.set(x + 2.5, 5, z);
-    group.add(lamp);
-  }
-
-  // Old brick buildings ringing the plaza and filling the two blocks.
-  const brick = [0x9a5a44, 0x8a6a4a, 0xa87a52, 0x7a5a4a, 0x96684a];
-  const spots = [
-    { x: -232, z: -87, w: 16, d: 14, h: 11 },
-    { x: -232, z: -29, w: 15, d: 13, h: 9 },
-    { x: -174, z: -87, w: 17, d: 14, h: 13 },
-    { x: -174, z: -29, w: 14, d: 12, h: 8 },
-    { x: -203, z: -100, w: 18, d: 10, h: 10 },
-    { x: -203, z: -16, w: 18, d: 10, h: 12 },
-    { x: -246, z: -58, w: 12, d: 16, h: 9 },
-    { x: -160, z: -58, w: 12, d: 16, h: 10 },
-  ];
-  for (let i = 0; i < spots.length; i += 1) {
-    const s = spots[i];
-    box(s.x, 0, s.z, s.w, s.h, s.d, brick[i % brick.length], true);
-    // Shuttered windows and a striped awning over the ground floor.
-    for (let w = 0; w < 3; w += 1) {
-      box(s.x - s.w / 2 + 4 + w * 5, 5, s.z + s.d / 2 + 0.05, 1.8, 2, 0.1, 0x2a3a4a);
-      box(s.x - s.w / 2 + 4 + w * 5, 8.5, s.z + s.d / 2 + 0.05, 1.8, 2, 0.1, 0x2a3a4a);
+  // Old buildings around both blocks: stucco walls, tile roofs, balconies, awnings.
+  const wallCols = [0xe8dcc0, 0xd9b36a, 0xc9a06a, 0xe6c8a2, 0xcfb8a0];
+  const blocks = [[-203, -87], [-203, -29]];
+  const buildings = [];
+  for (const [bx, bz] of blocks) {
+    for (let i = 0; i < 6; i += 1) {
+      const ang = (i / 6) * Math.PI * 2;
+      const x = bx + Math.cos(ang) * 24;
+      const z = bz + Math.sin(ang) * 15;
+      if (Math.abs(x + 203) < 8 && Math.abs(z + 58) < 8) continue;
+      const w = 9 + rng() * 4;
+      const h = 7 + rng() * 6;
+      const d = 8 + rng() * 3;
+      const b = box(group, colliders, w, h, d, x, h / 2, z, mat(wallCols[(i + (bx > -100 ? 1 : 0)) % wallCols.length]), true);
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.72, 2.6, 4), mat(0x8a4a2a));
+      roof.position.set(x, h + 1.3, z);
+      roof.rotation.y = Math.PI / 4;
+      group.add(roof);
+      const awning = new THREE.Mesh(new THREE.BoxGeometry(w * 0.7, 0.3, 2.4), mat(0x7a3a3a));
+      awning.position.set(x, 3.2, z + d / 2 + 1);
+      awning.rotation.x = 0.25;
+      group.add(awning);
+      buildings.push(b);
     }
-    const awning = new THREE.Mesh(
-      new THREE.BoxGeometry(s.w * 0.8, 0.3, 3),
-      new THREE.MeshStandardMaterial({ color: i % 2 ? 0xd84a3a : 0x2a8a6a, roughness: 0.9 })
-    );
-    awning.position.set(s.x, 3.4, s.z + s.d / 2 + 1.4);
-    awning.rotation.x = 0.25;
-    group.add(awning);
-    // Chimney.
-    box(s.x + s.w / 3, s.h, s.z, 1.4, 2.4, 1.4, 0x6a4a3a);
   }
 
-  // Cobble side streets between the blocks.
-  const cobble = new THREE.MeshStandardMaterial({ color: 0x8a8074, roughness: 1 });
-  for (const [x, z, w, d] of [[-203, -87, 10, 30], [-203, -29, 10, 30], [-218, -58, 30, 10]]) {
-    const street = new THREE.Mesh(new THREE.BoxGeometry(w, 0.25, d), cobble);
-    street.position.set(x, 0.15, z);
-    street.receiveShadow = true;
-    group.add(street);
-  }
-  // Sundial at the plaza edge and a clock face on the tallest plaza building.
-  const dial = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.4, 1.6, 0.5, 12),
-    new THREE.MeshStandardMaterial({ color: 0x9a938a, roughness: 1 })
-  );
-  dial.position.set(-188, 0.7, -46);
-  group.add(dial);
-  box(-188, 1, -46, 0.2, 1.4, 1.2, 0xd8a82a);
-  const clock = new THREE.Mesh(
-    new THREE.CircleGeometry(2.2, 20),
-    new THREE.MeshStandardMaterial({ color: 0xf0f0e8, roughness: 0.8 })
-  );
-  clock.position.set(-174, 11, -79.8);
+  // Church with a bell tower on the north block.
+  const church = box(group, colliders, 12, 9, 16, -203, 4.5, -100, mat(0xf0e8d8), true);
+  const tower = box(group, colliders, 4, 16, 4, -209, 8, -104, mat(0xf0e8d8), true);
+  const spire = new THREE.Mesh(new THREE.ConeGeometry(3, 5, 4), mat(0x5a6a7a));
+  spire.position.set(-209, 18.5, -104);
+  spire.rotation.y = Math.PI / 4;
+  group.add(spire);
+  // Clock face on the bell tower so the plaza can tell the hour.
+  const clock = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.4, 0.2, 16),
+    new THREE.MeshBasicMaterial({ color: 0xf2f2e8 }));
+  clock.position.set(-209, 13, -101.8);
+  clock.rotation.x = Math.PI / 2;
   group.add(clock);
-  box(-174, 11, -79.7, 0.15, 2.6, 0.15, 0x222222);
-  box(-174, 11, -79.7, 1.8, 0.15, 0.15, 0x222222);
 
-  // Market stalls in the plaza corners.
+  // Plaza benches, lamps and market stalls.
+  const benchMat = mat(0x6a4a2a);
+  for (let i = 0; i < 6; i += 1) {
+    const a = (i / 6) * Math.PI * 2;
+    const bench = new THREE.Mesh(new THREE.BoxGeometry(3, 0.5, 1), benchMat);
+    bench.position.set(-203 + Math.cos(a) * 13, 0.8, -58 + Math.sin(a) * 10);
+    bench.rotation.y = -a;
+    group.add(bench);
+  }
   for (let i = 0; i < 4; i += 1) {
-    const x = -216 + (i % 2) * 26;
-    const z = -70 + Math.floor(i / 2) * 24;
-    box(x, 0.4, z, 3, 1, 2, 0x7a5a38, true);
-    const canopy = new THREE.Mesh(
-      new THREE.BoxGeometry(3.6, 0.2, 2.6),
-      new THREE.MeshStandardMaterial({ color: [0xe8a82a, 0x2a8a3a, 0xd84a6a, 0x2a6ad8][i], roughness: 0.9 })
-    );
-    canopy.position.set(x, 2.6, z);
+    const stall = box(group, colliders, 4, 2.6, 3, -218 + i * 10, 1.6, -44, mat([0xc95a3a, 0x3a7a4a, 0x3a5a9a, 0xd9a03a][i]), true);
+    const canopy = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.3, 3.6), mat(0xf2f2e8));
+    canopy.position.set(-218 + i * 10, 3.2, -44);
     group.add(canopy);
-    for (let f = 0; f < 4; f += 1) {
-      const fruit = new THREE.Mesh(
-        new THREE.SphereGeometry(0.28, 6, 5),
-        new THREE.MeshStandardMaterial({ color: [0xe84a2a, 0xf0c82a, 0x2a8a3a, 0xe8a82a][f], roughness: 0.7 })
-      );
-      fruit.position.set(x - 1 + f * 0.7, 1.2, z);
-      group.add(fruit);
-    }
   }
 
-  // Lighthouse on the south-west beach at (-270, 300), sea starting near z 330.
-  const sand = new THREE.Mesh(
-    new THREE.BoxGeometry(70, 1, 60),
-    new THREE.MeshStandardMaterial({ color: 0xe8d8a8, roughness: 1 })
-  );
-  sand.position.set(-270, 0.4, 300);
-  sand.receiveShadow = true;
-  group.add(sand);
-  const tower = new THREE.Mesh(
-    new THREE.CylinderGeometry(3, 4.4, 22, 12),
-    new THREE.MeshStandardMaterial({ color: 0xf0ede2, roughness: 0.8 })
-  );
-  tower.position.set(-270, 11.5, 300);
-  tower.castShadow = true;
-  group.add(tower);
-  // Red bands around the tower.
-  for (const y of [7, 15]) {
-    const band = new THREE.Mesh(
-      new THREE.CylinderGeometry(3.5, 3.8, 2.2, 12),
-      new THREE.MeshStandardMaterial({ color: 0xc82a2a, roughness: 0.8 })
-    );
-    band.position.set(-270, y, 300);
+  // Lighthouse at (-270,300) on the SW beach.
+  const lightBase = new THREE.Mesh(new THREE.CylinderGeometry(6, 7, 3, 12), mat(0x8d8d85));
+  lightBase.position.set(-270, 1.5, 300);
+  group.add(lightBase);
+  const lightTower = new THREE.Mesh(new THREE.CylinderGeometry(3, 4.2, 18, 12), mat(0xf2f2e8));
+  lightTower.position.set(-270, 12, 300);
+  lightTower.castShadow = true;
+  group.add(lightTower);
+  for (let i = 0; i < 3; i += 1) {
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(3.5 - i * 0.3, 3.6 - i * 0.3, 1.6, 12), mat(0xc93a3a));
+    band.position.set(-270, 7 + i * 5, 300);
     group.add(band);
   }
-  const lampRoom = new THREE.Mesh(
-    new THREE.CylinderGeometry(3.2, 3.2, 3, 12),
-    new THREE.MeshStandardMaterial({ color: 0x222226, roughness: 0.5 })
-  );
-  lampRoom.position.set(-270, 23.5, 300);
+  const lampRoom = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 2.6, 12), mat(0x222222));
+  lampRoom.position.set(-270, 22.2, 300);
   group.add(lampRoom);
-  beamLight = new THREE.Mesh(
-    new THREE.SphereGeometry(1.4, 10, 8),
-    new THREE.MeshStandardMaterial({ color: 0xfff2b0, emissive: 0xffe680, emissiveIntensity: 3 })
-  );
-  beamLight.position.set(-270, 23.5, 300);
-  group.add(beamLight);
-  beam = new THREE.Mesh(
-    new THREE.ConeGeometry(4, 34, 12, 1, true),
-    new THREE.MeshStandardMaterial({
-      color: 0xfff2b0, emissive: 0xffe680, emissiveIntensity: 0.7,
-      transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false,
-    })
-  );
-  beam.position.set(-270, 23.5, 300);
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(1.1, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xfff2b0 }));
+  lamp.position.set(-270, 22.2, 300);
+  group.add(lamp);
+  const beam = new THREE.Mesh(new THREE.ConeGeometry(3, 34, 10, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 0.3, side: THREE.DoubleSide }));
+  beam.position.set(-270, 22.2, 300);
   beam.rotation.z = Math.PI / 2;
-  beam.translateY(-17);
   group.add(beam);
-  addCollider(-270, 300, 9, 9);
-  // Keeper's cottage beside the lighthouse.
-  box(-252, 0.8, 312, 9, 5, 7, 0xe8d8b8, true);
+  colliders.push({ minX: -277, maxX: -263, minZ: 293, maxZ: 307 });
 
-  if (world.city) {
-    if (!world.city.colliders) world.city.colliders = [];
-    world.city.colliders.push(...colliders);
-    if (!world.city.districts) world.city.districts = {};
-    world.city.districts.oldtown = { name: 'Old Town', colliders };
-  }
-  if (!world.districts) world.districts = {};
-  world.districts.oldtown = { name: 'Old Town', colliders };
+  function lighthousePosition() { return new THREE.Vector3(-270, 0, 300); }
 
   return {
-    name: 'oldtown',
-    group,
-    colliders,
-    plazaPosition() {
-      return { x: -203, y: 0.4, z: -58 };
-    },
-    lighthousePosition() {
-      return { x: -270, y: 23.5, z: 300 };
-    },
-    update(dt) {
-      if (beam) beam.rotation.y += dt * 0.6;
-    },
+    group, buildings, church, lighthousePosition,
+    update(dt) { beam.rotation.y += dt * 0.7; },
   };
 }

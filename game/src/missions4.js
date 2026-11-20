@@ -1,78 +1,112 @@
-// missions4.js — Missions 9-12, the Harbor War ($20,000 total).
-// A rival crew is moving on the marina and the lighthouse. Rico escorts a
-// truck through the Docks, runs a timed delivery, takes down their
-// lookout, and ends the war at the lighthouse.
-// Plain definitions only: the runner in missions.js owns stage flow,
-// markers, timers, rewards and the onComplete call.
-export const HARBOR_DEFS = [
-  {
-    id: 9, title: 'Harbor Escort', reward: 3000, arc: 'harbor', requires: 8,
-    briefing: 'Escort the Coral truck from the Docks warehouse to the marina pier.',
-    stages: [
-      { kind: 'reach', at: { x: -215, z: -215 }, radius: 9, objective: 'Meet the truck at the Docks warehouse' },
-      { kind: 'drive', at: { x: 0, z: 116 }, radius: 10, objective: 'Escort the truck through downtown' },
-      { kind: 'drive', at: { x: 295, z: 168 }, radius: 9, objective: 'Deliver the truck to the marina pier' },
-    ],
-    onComplete(world) {
-      world.harborState = world.harborState || {};
-      world.harborState.escortDone = true;
-    },
-  },
-  {
-    id: 10, title: 'Timed Delivery', reward: 4000, arc: 'harbor', requires: 9,
-    briefing: 'Three harbor drops, 180 seconds. The tide waits for no one.',
-    stages: [
-      { kind: 'reach', at: { x: 295, z: 168 }, radius: 7, timeLimit: 180, objective: 'Drop 1/3 at the marina pier' },
-      { kind: 'reach', at: { x: 0, z: 318 }, radius: 7, timeLimit: 180, objective: 'Drop 2/3 at the boardwalk pier' },
-      { kind: 'reach', at: { x: -270, z: 300 }, radius: 7, timeLimit: 180, objective: 'Drop 3/3 at the lighthouse' },
-    ],
-    onComplete(world) {
-      world.harborState = world.harborState || {};
-      world.harborState.deliveryDone = true;
-      if (world.territories && world.territories.Marina !== undefined) {
-        world.territories.Marina = Math.min(100, (world.territories.Marina || 0) + 12);
-      }
-    },
-  },
-  {
-    id: 11, title: 'The Lookout', reward: 5000, arc: 'harbor', requires: 10,
-    briefing: 'A rival lookout on the lighthouse is calling in every Coral move. Take him down.',
-    stages: [
-      { kind: 'reach', at: { x: -260, z: 290 }, radius: 10, objective: 'Reach the lighthouse beach' },
-      {
-        kind: 'fight', at: { x: -270, z: 300 }, radius: 14, enemyCount: 5, enemyHealth: 60,
-        objective: 'Take down the lighthouse crew (5)',
-      },
-      { kind: 'reach', at: { x: -270, z: 300 }, radius: 9, objective: 'Search the lighthouse base' },
-    ],
-    onComplete(world) {
-      world.harborState = world.harborState || {};
-      world.harborState.lookoutDown = true;
-    },
-  },
-  {
-    id: 12, title: 'Lighthouse Finale', reward: 8000, arc: 'harbor', requires: 11,
-    briefing: 'The rivals are storming the lighthouse. Hold the point for 60 seconds, then light the beam.',
-    stages: [
-      {
-        kind: 'defend', at: { x: -270, z: 300 }, radius: 14, duration: 60,
-        enemyCount: 5, enemyHealth: 70, objective: 'Defend the lighthouse for 60 seconds',
-      },
-      { kind: 'reach', at: { x: -270, z: 300 }, radius: 9, objective: 'Light the lighthouse beam — the harbor is yours' },
-      { kind: 'reach', at: { x: 0, z: 318 }, radius: 9, objective: 'Return to the boardwalk pier' },
-    ],
-    onComplete(world) {
-      world.harborState = world.harborState || {};
-      world.harborState.finaleDone = true;
-      world.harborState.arcComplete = true;
-      if (world.territories && world.territories.Boardwalk !== undefined) {
-        world.territories.Boardwalk = Math.min(100, (world.territories.Boardwalk || 0) + 15);
-      }
-      if (world.territories && world.territories.Marina !== undefined) {
-        world.territories.Marina = Math.min(100, (world.territories.Marina || 0) + 10);
-      }
-    },
-  },
-];
+// missions4.js — M9-M12, the Harbor War ($20,000 total).
+// An escort, a timed delivery, a takedown, and a finale at the lighthouse (-270, 300).
+// Factory: createMissions4(world) registers M9-M12 into world.missionRegistry.
 
-export function getDefs() { return HARBOR_DEFS; }
+function logEvent(world, text) {
+  if (Array.isArray(world.events)) world.events.push(text);
+}
+
+function addCrew(world, name) {
+  world.crew = world.crew || [];
+  if (!world.crew.includes(name)) world.crew.push(name);
+}
+
+export function createMissions4(world) {
+  world.missionRegistry = world.missionRegistry || {};
+  const R = world.missionRegistry;
+
+  R.m9 = {
+    id: 'm9',
+    name: 'Harbor Escort',
+    payout: 4000,
+    stages: [
+      { kind: 'reach', objective: 'Meet the freighter captain at the east pier', marker: { x: 260, z: 260 }, radius: 6,
+        onComplete(w) { addCrew(w, 'captain-ortiz'); } },
+      { kind: 'escort', objective: 'Escort the freighter truck to the warehouse — stay close', marker: { x: 180, z: 200 }, radius: 10, timer: 150 },
+      { kind: 'reach', objective: 'See the truck into the warehouse', marker: { x: 160, z: 180 }, radius: 8 },
+    ],
+    onComplete(w) {
+      w.revenge = w.revenge || {};
+      w.revenge.harborEscort = true;
+      logEvent(w, 'M9 done — the freighter cargo is safe in the warehouse.');
+    },
+  };
+
+  R.m10 = {
+    id: 'm10',
+    name: 'Hot Cargo',
+    payout: 5000,
+    stages: [
+      { kind: 'deliver', objective: 'Run the hot cargo to the north dock — 120s', marker: { x: -200, z: 260 }, radius: 8, timer: 120 },
+      { kind: 'deliver', objective: 'Second drop at the fish market — 120s', marker: { x: -240, z: 180 }, radius: 8, timer: 120 },
+      { kind: 'deliver', objective: 'Final drop at the lighthouse road — 120s', marker: { x: -270, z: 300 }, radius: 8, timer: 120 },
+    ],
+    onComplete(w) {
+      w.revenge = w.revenge || {};
+      w.revenge.hotCargo = true;
+      logEvent(w, 'M10 done — every drop landed before the clock did.');
+    },
+  };
+
+  R.m11 = {
+    id: 'm11',
+    name: 'Harbor Takedown',
+    payout: 6000,
+    stages: [
+      { kind: 'reach', objective: 'Reach the rival gang’s harbor stash', marker: { x: -180, z: 120 }, radius: 10 },
+      {
+        kind: 'fight',
+        objective: 'Take down the harbor crew guarding the stash',
+        marker: { x: -180, z: 120 },
+        radius: 14,
+        enemies: [
+          { x: -180, z: 120, health: 100 },
+          { x: -168, z: 128, health: 120 },
+          { x: -192, z: 112, health: 100 },
+          { x: -176, z: 136, health: 100 },
+          { x: -188, z: 104, health: 150 },
+          { x: -160, z: 116, health: 100 },
+          { x: -172, z: 100, health: 120 },
+        ],
+      },
+      { kind: 'reach', objective: 'Torch the stash and get clear', marker: { x: -150, z: 80 }, radius: 8 },
+    ],
+    onComplete(w) {
+      w.revenge = w.revenge || {};
+      w.revenge.harborTakedown = true;
+      logEvent(w, 'M11 done — the rival harbor crew is finished.');
+    },
+  };
+
+  R.m12 = {
+    id: 'm12',
+    name: 'Lighthouse Finale',
+    payout: 5000,
+    stages: [
+      { kind: 'reach', objective: 'Drive to the lighthouse', marker: { x: -270, z: 300 }, radius: 10,
+        onComplete(w) { addCrew(w, 'marco'); addCrew(w, 'tessa'); } },
+      {
+        kind: 'fight',
+        objective: 'Hold the lighthouse against the last harbor gang',
+        marker: { x: -270, z: 300 },
+        radius: 16,
+        enemies: [
+          { x: -270, z: 300, health: 120 },
+          { x: -258, z: 308, health: 100 },
+          { x: -282, z: 292, health: 100 },
+          { x: -262, z: 288, health: 150 },
+          { x: -278, z: 312, health: 100 },
+        ],
+      },
+      { kind: 'reach', objective: 'Light the beacon — claim the harbor', marker: { x: -270, z: 300 }, radius: 6 },
+    ],
+    onComplete(w) {
+      w.revenge = w.revenge || {};
+      w.revenge.harborWar = true;
+      w.revenge.lighthouseTaken = true;
+      logEvent(w, 'M12 done — the Harbor War is won. The lighthouse is yours.');
+    },
+  };
+
+  return R;
+}

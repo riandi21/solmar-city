@@ -1,71 +1,127 @@
-// missions6.js — Missions 17-20, the Casino Heist ($30,000 total).
-// Rico cases the casino, cracks the vault, runs the loot out by boat,
-// and makes the big score: out by plane at 5 stars.
-// Plain definitions only: the runner in missions.js owns stage flow,
-// markers, timers, rewards and the onComplete call.
-export const CASINO_DEFS = [
-  {
-    id: 17, title: 'Casing the Joint', reward: 3000, arc: 'heist', requires: 16,
-    briefing: 'Scout three security points around the casino without raising wanted above 1 star.',
-    stages: [
-      { kind: 'reach', at: { x: 116, z: 58 }, radius: 7, maxWanted: 1, objective: 'Scout security point 1/3 — casino front' },
-      { kind: 'reach', at: { x: 116, z: 116 }, radius: 7, maxWanted: 1, objective: 'Scout security point 2/3 — side door' },
-      { kind: 'reach', at: { x: 58, z: 116 }, radius: 7, maxWanted: 1, objective: 'Scout security point 3/3 — rear alley' },
-    ],
-    onComplete(world) {
-      world.heistState = world.heistState || {};
-      world.heistState.cased = true;
-    },
-  },
-  {
-    id: 18, title: 'The Vault', reward: 8000, arc: 'heist', requires: 17,
-    briefing: '180 seconds. Dodge the guards, grab the cash, and get to the getaway car at the marina pier.',
-    stages: [
-      { kind: 'reach', at: { x: 116, z: 87 }, radius: 8, timeLimit: 180, objective: 'Get inside the casino' },
-      { kind: 'collect', at: { x: 116, z: 87 }, radius: 6, timeLimit: 180, objective: 'Crack the vault and grab the cash' },
-      { kind: 'drive', at: { x: 295, z: 168 }, radius: 9, timeLimit: 180, objective: 'Escape to the getaway car at the marina pier' },
-    ],
-    onComplete(world) {
-      world.heistState = world.heistState || {};
-      world.heistState.vaultDone = true;
-      world.heistState.loot = (world.heistState.loot || 0) + 8000;
-    },
-  },
-  {
-    id: 19, title: 'Harbor Run', reward: 7000, arc: 'heist', requires: 18,
-    briefing: 'Deliver the loot by boat to the yacht. Police boats are out — keep moving.',
-    stages: [
-      { kind: 'boat', at: { x: 295, z: 168 }, radius: 9, objective: 'Board the boat at the marina pier' },
-      { kind: 'boat', at: { x: 320, z: 240 }, radius: 10, objective: 'Run the loot out past the harbor mouth' },
-      { kind: 'boat', at: { x: 305, z: 175 }, radius: 9, objective: 'Deliver the loot to the yacht' },
-    ],
-    onComplete(world) {
-      world.heistState = world.heistState || {};
-      world.heistState.harborRunDone = true;
-      world.heistState.loot = (world.heistState.loot || 0) + 7000;
-    },
-  },
-  {
-    id: 20, title: 'The Big Score', reward: 12000, arc: 'heist', requires: 19,
-    briefing: 'Finale: drive to the airfield and escape by plane at 5 stars. The whole city is watching.',
-    stages: [
-      { kind: 'drive', at: { x: 200, z: -230 }, radius: 10, objective: 'Drive to the airfield' },
-      {
-        kind: 'survive', wanted: 5, duration: 20,
-        objective: 'Hold out at 5 stars while the plane is readied',
-      },
-      { kind: 'fly', at: { x: 370, z: 360 }, radius: 14, objective: 'Escape by plane to The Islands' },
-    ],
-    onComplete(world) {
-      world.heistState = world.heistState || {};
-      world.heistState.bigScoreDone = true;
-      world.heistState.arcComplete = true;
-      world.heistState.loot = (world.heistState.loot || 0) + 12000;
-      if (world.territories && world.territories.Airfield !== undefined) {
-        world.territories.Airfield = Math.min(100, (world.territories.Airfield || 0) + 10);
-      }
-    },
-  },
-];
+// missions6.js — M17-M20, the Casino Heist ($30,000 total).
+// M17 casing, M18 the vault, M19 the harbor run, M20 the big score.
+// Factory: createMissions6(world) registers M17-M20 into world.missionRegistry.
+// Heist arc flags are set in each mission's onComplete (world.heist.*).
 
-export function getDefs() { return CASINO_DEFS; }
+function logEvent(world, text) {
+  if (Array.isArray(world.events)) world.events.push(text);
+}
+
+function addCrew(world, name) {
+  world.crew = world.crew || [];
+  if (!world.crew.includes(name)) world.crew.push(name);
+}
+
+export function createMissions6(world) {
+  world.missionRegistry = world.missionRegistry || {};
+  const R = world.missionRegistry;
+
+  R.m17 = {
+    id: 'm17',
+    name: 'Casing the Casino',
+    payout: 3000,
+    stages: [
+      { kind: 'reach', objective: 'Scout security point 1 — the front entrance (keep wanted at 1 star or less)', marker: { x: 90, z: 60 }, radius: 6, maxWanted: 1 },
+      { kind: 'reach', objective: 'Scout security point 2 — the side garage (keep wanted at 1 star or less)', marker: { x: 110, z: 40 }, radius: 6, maxWanted: 1 },
+      { kind: 'reach', objective: 'Scout security point 3 — the roof access (keep wanted at 1 star or less)', marker: { x: 100, z: 80 }, radius: 6, maxWanted: 1 },
+    ],
+    onComplete(w) {
+      w.heist = w.heist || {};
+      w.heist.cased = true;
+      w.heist.securityPoints = 3;
+      logEvent(w, 'M17 done — all three security points scouted, no heat raised.');
+    },
+  };
+
+  R.m18 = {
+    id: 'm18',
+    name: 'The Vault',
+    payout: 8000,
+    stages: [
+      { kind: 'reach', objective: 'Enter the casino through the side garage', marker: { x: 110, z: 40 }, radius: 6,
+        onComplete(w) { addCrew(w, 'lena'); addCrew(w, 'marco'); } },
+      {
+        kind: 'fight',
+        objective: 'Dodge the vault guards and clear the vault floor',
+        marker: { x: 100, z: 60 },
+        radius: 12,
+        enemies: [
+          { x: 100, z: 60, health: 120 },
+          { x: 92, z: 66, health: 100 },
+          { x: 108, z: 54, health: 100 },
+          { x: 96, z: 50, health: 150 },
+        ],
+      },
+      { kind: 'timed', objective: 'Grab the cash from the vault — 180s on the clock', marker: { x: 100, z: 70 }, radius: 6, timer: 180 },
+      { kind: 'reach', objective: 'Escape to the getaway car at the marina pier', marker: { x: 305, z: 175 }, radius: 10 },
+    ],
+    onComplete(w) {
+      w.heist = w.heist || {};
+      w.heist.vaultHit = true;
+      w.heist.lootSecured = true;
+      logEvent(w, 'M18 done — the vault is empty and the loot is in the getaway car.');
+    },
+  };
+
+  R.m19 = {
+    id: 'm19',
+    name: 'The Harbor Run',
+    payout: 7000,
+    stages: [
+      { kind: 'reach', objective: 'Board the boat at the marina pier with the loot', marker: { x: 305, z: 175 }, radius: 8 },
+      {
+        kind: 'survive',
+        objective: 'Outrun the police boats and helicopter — 60s at 4 stars',
+        marker: { x: 280, z: 220 },
+        radius: 20,
+        timer: 60,
+        minWanted: 4,
+        onEnter(w) {
+          w.wanted = Math.max(w.wanted || 0, 4);
+          if (typeof w.heat === 'number') w.heat = Math.max(w.heat, 4);
+        },
+      },
+      { kind: 'reach', objective: 'Deliver the loot to the yacht', marker: { x: 305, z: 175 }, radius: 10 },
+    ],
+    onComplete(w) {
+      w.heist = w.heist || {};
+      w.heist.harborRun = true;
+      w.heist.lootOnYacht = true;
+      logEvent(w, 'M19 done — the loot is stashed aboard the yacht.');
+    },
+  };
+
+  R.m20 = {
+    id: 'm20',
+    name: 'The Big Score',
+    payout: 12000,
+    stages: [
+      { kind: 'reach', objective: 'Drive the crew to the airfield', marker: { x: 400, z: -200 }, radius: 10,
+        onComplete(w) { addCrew(w, 'rico'); addCrew(w, 'lena'); addCrew(w, 'marco'); addCrew(w, 'tessa'); } },
+      {
+        kind: 'survive',
+        objective: 'Hold the airfield at 5 stars until the plane is ready — 60s',
+        marker: { x: 400, z: -200 },
+        radius: 18,
+        timer: 60,
+        minWanted: 5,
+        onEnter(w) {
+          w.wanted = Math.max(w.wanted || 0, 5);
+          if (typeof w.heat === 'number') w.heat = Math.max(w.heat, 5);
+        },
+      },
+      { kind: 'reach', objective: 'Board the plane and escape — the big score is yours', marker: { x: 460, z: -260 }, radius: 10 },
+    ],
+    onComplete(w) {
+      w.heist = w.heist || {};
+      w.heist.bigScore = true;
+      w.heist.casinoHeist = true;
+      w.heist.escapedByPlane = true;
+      w.revenge = w.revenge || {};
+      w.revenge.casinoHeistDone = true;
+      logEvent(w, 'M20 done — THE BIG SCORE. The Casino Heist is complete.');
+    },
+  };
+
+  return R;
+}

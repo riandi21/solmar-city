@@ -1,299 +1,179 @@
-// Jet Ski: a fast, agile watercraft — quicker than the marina boats,
-// but a hard hit on a wave or a dock costs health and can throw Rico
-// off. Enter with E at the Sunset Beach jet ski dock or the marina pier
-// (the player module owns the E press; this module only drives). It
-// leaves a wake, jumps small waves, and tracks a best race time in the
-// kingpin state for the marina-to-Islands jet ski race.
 import * as THREE from 'three';
-import { isDown } from './player.js';
 
-export const JET_SKI_DOCK = { x: -150, z: 320 };
-export const MARINA_PIER = { x: 295, z: 168 };
-export const TOP_SPEED = 24;
-export const RACE_BUOYS = [
-  { x: 300, z: 200 },
-  { x: 340, z: 280 },
-  { x: 370, z: 360 },
-];
+// Jet ski: fast, very agile on water, vulnerable — a hard hit on a wave or
+// a dock costs health and can throw Rico off. Enter with E at the Sunset
+// Beach jet ski dock (-150, 320) or the marina pier. Leaves a wake, jumps
+// small waves, and is the craft for smuggling runs and racing; the best
+// race time is tracked in world.kingpin.jetSkiBest.
+const DOCK = { x: -150, z: 320 };
+const MARINA = { x: 120, z: 300 };
+const WATER_LEVEL = 0;
 
-function isWaterAt(x, z) {
-  if (z >= 312) return true; // open sea south of the beach
-  if (x >= 261 && x <= 400 && z >= 60 && z <= 260) return true; // marina basin
-  if (x >= 290 && x <= 460 && z >= 290 && z <= 460) return true; // Islands lagoon
-  return false;
+function keyDown(world, code, letter) {
+  const keys = world && world.input && world.input.keys;
+  if (!keys) return false;
+  return keys.has(code) || keys.has(letter);
 }
 
-function waveHeight(x, z, t) {
-  return Math.sin(x * 0.08 + t * 1.7) * 0.16 + Math.sin(z * 0.11 - t * 1.3) * 0.13;
-}
-
-function buildJetSkiMesh(color) {
+function makeJetSkiMesh(color) {
   const group = new THREE.Group();
-  const paint = new THREE.MeshStandardMaterial({ color, metalness: 0.3, roughness: 0.4 });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.85 });
-  const hull = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.32, 2.4), paint);
-  hull.position.y = 0.22;
-  hull.name = 'hull';
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.45, 0.7, 4), paint);
-  nose.rotation.x = Math.PI / 2;
+  const paint = new THREE.MeshLambertMaterial({ color });
+  const dark = new THREE.MeshLambertMaterial({ color: 0x212121 });
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.35, 0.9), paint);
+  hull.position.y = 0.2;
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.45, 0.8, 4), paint);
+  nose.rotation.z = -Math.PI / 2;
   nose.rotation.y = Math.PI / 4;
-  nose.position.set(0, 0.24, 1.5);
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.18, 0.9), dark);
-  seat.position.set(0, 0.46, -0.45);
-  const bars = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.7, 6), dark);
-  bars.rotation.z = Math.PI / 2;
-  bars.position.set(0, 0.72, 0.55);
+  nose.position.set(1.6, 0.2, 0);
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.22, 0.6), dark);
+  seat.position.set(-0.5, 0.45, 0);
+  const bars = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.7), dark);
+  bars.position.set(0.7, 0.6, 0);
   group.add(hull, nose, seat, bars);
   group.traverse((o) => { if (o.isMesh) o.castShadow = true; });
   return group;
 }
 
-export function enterJetSki(world, ski) {
-  const p = world.player;
-  if (!p || !ski) return false;
-  p.currentJetSki = ski;
-  p.currentCar = null;
-  p.currentBike = null;
-  p.onFoot = false;
-  ski.driver = 'player';
-  if (ski.position) p.position.copy(ski.position);
-  return true;
-}
-
-export function exitJetSki(world) {
-  const p = world.player;
-  const ski = p && p.currentJetSki;
-  if (!p || !ski) return false;
-  p.currentJetSki = null;
-  ski.driver = null;
-  ski.speed = 0;
-  p.onFoot = true;
-  p.speed = 0;
-  // Step off onto the nearest shore side of the ski.
-  p.position.set(ski.position.x + 1.4, 0, ski.position.z + 1.0);
-  if (p.mesh) { p.mesh.visible = true; p.mesh.position.copy(p.position); }
-  return true;
-}
-
 export function createJetSki(scene, world) {
-  const rng = typeof world.rng === 'function' ? world.rng : Math.random;
   if (!Array.isArray(world.jetSkis)) world.jetSkis = [];
   if (!world.kingpin) world.kingpin = {};
-  if (world.kingpin.jetSkiBestTime === undefined) world.kingpin.jetSkiBestTime = null;
+  if (world.kingpin.jetSkiBest == null) world.kingpin.jetSkiBest = null;
+  const wake = [];
+  const wakeGeo = new THREE.PlaneGeometry(1.2, 2.2);
+  const wakeMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+  let raceTimer = null;
 
-  // Wake pool: fading foam quads dropped behind the ski while moving.
-  const wakePool = [];
-  const wakeMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false });
-  for (let i = 0; i < 28; i += 1) {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9), wakeMat.clone());
-    m.rotation.x = -Math.PI / 2;
-    m.visible = false;
-    if (scene) scene.add(m);
-    wakePool.push({ mesh: m, life: 0 });
-  }
-  let wakeIdx = 0;
-  let wakeTimer = 0;
-
-  function spawnJetSki(x, z, opts = {}) {
-    const color = opts.color !== undefined ? opts.color : 0x2ec8d8;
-    const mesh = buildJetSkiMesh(color);
-    mesh.position.set(x, waveHeight(x, z, 0), z);
-    mesh.rotation.y = opts.heading !== undefined ? opts.heading : rng() * Math.PI * 2;
-    if (scene) scene.add(mesh);
-    const ski = {
-      kind: 'jetski',
-      mesh,
-      position: mesh.position,
-      heading: mesh.rotation.y,
-      speed: 0,
-      color,
-      driver: opts.driver || null,
-      vy: 0,
-      airborne: false,
-      race: null,
+  function spawnJetSki(x, z) {
+    const color = 0x00acc1;
+    const mesh = makeJetSkiMesh(color);
+    mesh.position.set(x, WATER_LEVEL, z);
+    scene.add(mesh);
+    const js = {
+      mesh, kind: 'jetski', color,
+      position: mesh.position, heading: 0, speed: 0,
+      maxSpeed: 46, accel: 32, steer: 3.4,
     };
-    world.jetSkis.push(ski);
-    return ski;
+    world.jetSkis.push(js);
+    return js;
   }
 
-  // One ski at the Sunset Beach dock, one at the marina pier. A third ski
-  // sits beached by the Surf Shack so a race can start from the beach.
-  // Dock skis face the open water (heading 0 = south, into the sea);
-  // a ski facing the beach would beach itself on the first throttle.
-  spawnJetSki(JET_SKI_DOCK.x, JET_SKI_DOCK.z + 4, { heading: 0 });
-  spawnJetSki(MARINA_PIER.x + 2, MARINA_PIER.z + 4, { heading: Math.PI / 2 });
-  spawnJetSki(-180, 318, { heading: 0, color: 0xe8b93a });
+  function addWake(x, z, heading) {
+    let w = wake.find((m) => !m.visible);
+    if (!w) {
+      if (wake.length >= 60) return;
+      w = new THREE.Mesh(wakeGeo, wakeMat);
+      w.rotation.x = -Math.PI / 2;
+      scene.add(w);
+      wake.push(w);
+    }
+    w.visible = true;
+    w.position.set(x, 0.05, z);
+    w.rotation.z = -heading;
+    w.userData.life = 2.5;
+    w.scale.setScalar(0.7 + Math.random() * 0.5);
+  }
 
-  function startRace() {
-    const p = world.player;
-    const ski = p && p.currentJetSki;
-    if (!ski) return { ok: false, reason: 'board a jet ski first' };
-    ski.race = { buoy: 0, time: 0, running: true };
-    return { ok: true };
+  function enterJetSki(js) {
+    if (!js) return false;
+    world.player.currentJetSki = js;
+    world.player.onFoot = false;
+    world.player.position.copy(js.position);
+    if (world.player.mesh) world.player.mesh.visible = false;
+    // Starting a race run from a dock starts the timer.
+    const nearDock = Math.hypot(js.position.x - DOCK.x, js.position.z - DOCK.z) < 12
+      || Math.hypot(js.position.x - MARINA.x, js.position.z - MARINA.z) < 12;
+    if (nearDock) raceTimer = 0;
+    return true;
+  }
+
+  function exitJetSki() {
+    const js = world.player.currentJetSki;
+    if (!js) return false;
+    if (raceTimer != null) {
+      if (world.kingpin.jetSkiBest == null || raceTimer < world.kingpin.jetSkiBest) {
+        world.kingpin.jetSkiBest = raceTimer;
+      }
+      raceTimer = null;
+    }
+    world.player.currentJetSki = null;
+    world.player.onFoot = true;
+    world.player.position.set(js.position.x + 2, 0, js.position.z + 2);
+    world.player.speed = 0;
+    if (world.player.mesh) world.player.mesh.visible = true;
+    return true;
+  }
+
+  function throwOff(js) {
+    js.speed = 0;
+    if (raceTimer != null) raceTimer = null;
+    world.player.currentJetSki = null;
+    world.player.onFoot = true;
+    world.player.position.set(js.position.x + 2, 0, js.position.z);
+    world.player.speed = 0;
+    if (world.player.mesh) world.player.mesh.visible = true;
   }
 
   function update(dt) {
-    if (!world || world.mode !== 'play') return;
-    const t = world.elapsed || 0;
+    for (const w of wake) {
+      if (!w.visible) continue;
+      w.userData.life -= dt;
+      w.material.opacity = Math.max(0, (w.userData.life / 2.5) * 0.4);
+      if (w.userData.life <= 0) w.visible = false;
+    }
+    const js = world.player.currentJetSki;
+    if (!js) {
+      for (const j of world.jetSkis) {
+        if (j && j.mesh) {
+          const wave = Math.sin(world.elapsed * 1.5 + j.position.x * 0.05 + j.position.z * 0.05) * 0.12;
+          j.mesh.position.set(j.position.x, WATER_LEVEL + wave, j.position.z);
+          j.mesh.rotation.y = j.heading || 0;
+        }
+      }
+      return;
+    }
     const p = world.player;
-    const ski = p && p.currentJetSki;
-    // Idle skis bob on the waves even when nobody rides them.
-    for (const s of world.jetSkis) {
-      if (s === ski) continue;
-      s.mesh.position.y = waveHeight(s.position.x, s.position.z, t);
-      s.mesh.rotation.z = Math.sin(t * 1.2 + s.position.x) * 0.05;
-    }
-    if (!ski || !ski.position) return;
-
-    const fwd = isDown(world, 'KeyW', 'ArrowUp');
-    const back = isDown(world, 'KeyS', 'ArrowDown');
-    const left = isDown(world, 'KeyA', 'ArrowLeft');
-    const right = isDown(world, 'KeyD', 'ArrowRight');
-
-    if (fwd) ski.speed += 20 * dt;
-    if (back) ski.speed -= 16 * dt;
-    if (!fwd && !back) ski.speed -= Math.sign(ski.speed) * Math.min(Math.abs(ski.speed), 7 * dt);
-    ski.speed = Math.max(-6, Math.min(TOP_SPEED, ski.speed));
-
+    if (raceTimer != null) raceTimer += dt;
+    const fwd = keyDown(world, 'KeyW', 'W');
+    const back = keyDown(world, 'KeyS', 'S');
+    const left = keyDown(world, 'KeyA', 'A');
+    const right = keyDown(world, 'KeyD', 'D');
+    if (fwd) js.speed += js.accel * dt;
+    if (back) js.speed -= js.accel * 0.7 * dt;
+    if (!fwd && !back) js.speed *= Math.max(0, 1 - 1.1 * dt);
+    js.speed = Math.max(-6, Math.min(js.maxSpeed, js.speed));
+    const steerFactor = Math.max(0.55, 1 - Math.abs(js.speed) / (js.maxSpeed * 1.8));
     const steerInput = (left ? 1 : 0) - (right ? 1 : 0);
-    const speedFactor = Math.min(1, Math.abs(ski.speed) / 9);
-    ski.heading += steerInput * 3.1 * speedFactor * (ski.speed >= 0 ? 1 : -1) * dt;
-    const prevX = ski.position.x;
-    const prevZ = ski.position.z;
-    ski.position.x += Math.sin(ski.heading) * ski.speed * dt;
-    ski.position.z += Math.cos(ski.heading) * ski.speed * dt;
-
-    // Stay on the water: beaching slows the ski hard and can throw Rico.
-    if (!isWaterAt(ski.position.x, ski.position.z)) {
-      ski.position.x = prevX;
-      ski.position.z = prevZ;
-      if (Math.abs(ski.speed) > 14) {
-        const dmg = 12;
-        p.health = Math.max(0, (p.health == null ? 100 : p.health) - dmg);
-        if (rng() < 0.5) {
-          exitJetSki(world);
-          if (Array.isArray(world.events)) world.events.push({ type: 'toast', text: 'Beached the jet ski — thrown off!' });
-          if (p.health <= 0) world.mode = 'over';
-          return;
-        }
-        if (Array.isArray(world.events)) world.events.push({ type: 'toast', text: 'Too shallow — turn back to open water!' });
-      }
-      ski.speed *= 0.4;
+    const dir = js.speed >= 0 ? 1 : -1;
+    js.heading += steerInput * js.steer * steerFactor * dir * dt * Math.min(1, Math.abs(js.speed) / 5 + 0.3);
+    const nx = js.position.x + Math.sin(js.heading) * js.speed * dt;
+    const nz = js.position.z + Math.cos(js.heading) * js.speed * dt;
+    // Dock hit: a hard hit on the dock costs health and throws Rico off;
+    // a slow approach just bumps the ski to a stop so docking is possible.
+    const dockHit = Math.hypot(nx - DOCK.x, nz - DOCK.z) < 3 || Math.hypot(nx - MARINA.x, nz - MARINA.z) < 3;
+    if (dockHit && Math.abs(js.speed) > 10) {
+      if (p.health != null) p.health = Math.max(0, p.health - 15);
+      throwOff(js);
+      return;
     }
-    ski.position.x = Math.max(-420, Math.min(470, ski.position.x));
-    ski.position.z = Math.max(-340, Math.min(470, ski.position.z));
-
-    // Waves: ride the swell, and jump small waves at speed.
-    const wave = waveHeight(ski.position.x, ski.position.z, t);
-    const waveAhead = waveHeight(
-      ski.position.x + Math.sin(ski.heading) * 2,
-      ski.position.z + Math.cos(ski.heading) * 2,
-      t,
-    );
-    if (!ski.airborne && ski.speed > 15 && waveAhead > wave + 0.12) {
-      ski.vy = 3.2 + ski.speed * 0.06;
-      ski.airborne = true;
+    if (dockHit) js.speed *= 0.3;
+    js.position.x = nx;
+    js.position.z = nz;
+    // Wake behind the ski while moving fast.
+    if (Math.abs(js.speed) > 6 && Math.random() < 0.7) {
+      addWake(js.position.x - Math.sin(js.heading) * 1.6, js.position.z - Math.cos(js.heading) * 1.6, js.heading);
     }
-    if (ski.airborne) {
-      ski.vy -= 12 * dt;
-      ski.position.y += ski.vy * dt;
-      if (ski.position.y <= wave) {
-        ski.position.y = wave;
-        ski.airborne = false;
-        ski.vy = 0;
-        if (Math.abs(ski.speed) > 20) ski.speed *= 0.96; // hard landing scrubs speed
-      }
-    } else {
-      ski.position.y = wave;
-    }
-
-    // Hard dock hit: slamming a pier at speed hurts.
-    for (const dock of [JET_SKI_DOCK, MARINA_PIER]) {
-      const d = Math.hypot(ski.position.x - dock.x, ski.position.z - dock.z);
-      if (d < 2.5 && Math.abs(ski.speed) > 12) {
-        p.health = Math.max(0, (p.health == null ? 100 : p.health) - 10);
-        ski.speed *= 0.3;
-        if (Array.isArray(world.events)) world.events.push({ type: 'toast', text: 'Slammed the dock!' });
-        if (p.health <= 0) world.mode = 'over';
-      }
-    }
-
-    // Wake trail while moving.
-    wakeTimer -= dt;
-    if (Math.abs(ski.speed) > 4 && wakeTimer <= 0) {
-      wakeTimer = 0.09;
-      const slot = wakePool[wakeIdx % wakePool.length];
-      wakeIdx += 1;
-      slot.mesh.visible = true;
-      slot.mesh.position.set(
-        ski.position.x - Math.sin(ski.heading) * 1.4,
-        Math.max(0.05, ski.position.y + 0.05),
-        ski.position.z - Math.cos(ski.heading) * 1.4,
-      );
-      slot.mesh.material.opacity = 0.5;
-      slot.life = 1.6;
-    }
-    for (const slot of wakePool) {
-      if (slot.life > 0) {
-        slot.life -= dt;
-        slot.mesh.material.opacity = Math.max(0, slot.life / 1.6) * 0.5;
-        const s = 0.9 + (1.6 - slot.life) * 0.9;
-        slot.mesh.scale.set(s, s, 1);
-        if (slot.life <= 0) slot.mesh.visible = false;
-      }
-    }
-
-    // Jet ski race: marina to the Islands, checkpoint buoys in order.
-    if (ski.race && ski.race.running) {
-      ski.race.time += dt;
-      const buoy = RACE_BUOYS[ski.race.buoy];
-      if (buoy && Math.hypot(ski.position.x - buoy.x, ski.position.z - buoy.z) < 8) {
-        ski.race.buoy += 1;
-        if (Array.isArray(world.events)) world.events.push({ type: 'toast', text: `Buoy ${ski.race.buoy} of ${RACE_BUOYS.length}!` });
-        if (ski.race.buoy >= RACE_BUOYS.length) {
-          ski.race.running = false;
-          const time = ski.race.time;
-          if (world.kingpin.jetSkiBestTime === null || time < world.kingpin.jetSkiBestTime) {
-            world.kingpin.jetSkiBestTime = time;
-          }
-          if (Array.isArray(world.events)) world.events.push({ type: 'toast', text: `Jet ski race done in ${time.toFixed(1)}s!` });
-        }
-      }
-    }
-
-    ski.mesh.position.copy(ski.position);
-    ski.mesh.rotation.y = ski.heading;
-    ski.mesh.rotation.z = -steerInput * speedFactor * 0.18;
-    ski.mesh.rotation.x = ski.airborne ? -0.12 : Math.sin(t * 2) * 0.03;
-    p.position.copy(ski.position);
-    p.position.y = Math.max(0, ski.position.y);
-    p.heading = ski.heading;
-    p.speed = ski.speed;
-    p.onFoot = false;
+    // Jump small waves: bob + a little air on wave crests at speed.
+    const wavePhase = world.elapsed * 2 + js.position.x * 0.08 + js.position.z * 0.08;
+    const waveH = Math.sin(wavePhase) * 0.25;
+    const air = Math.abs(js.speed) > 28 && Math.sin(wavePhase) > 0.85 ? 0.5 : 0;
+    js.mesh.position.set(js.position.x, WATER_LEVEL + waveH + air, js.position.z);
+    js.mesh.rotation.y = js.heading;
+    js.mesh.rotation.z = -steerInput * Math.min(0.25, Math.abs(js.speed) * 0.006);
+    p.position.copy(js.position);
+    p.heading = js.heading;
+    p.speed = js.speed;
+    if (p.mesh) p.mesh.visible = false;
   }
 
-  function spawnForShot(x, z, heading = 2.4) {
-    // Shot staging: a fresh jet ski at the marina, Rico boarded at once,
-    // so the chase shot shows the pursuit on the water, not an empty pier.
-    const ski = spawnJetSki(x, z, { heading, color: 0x2ec8d8 });
-    enterJetSki(world, ski);
-    ski.speed = 10;
-    if (world.player) world.player.jetSki = ski;
-    return ski;
-  }
-
-  const sys = {
-    name: 'jetski',
-    update,
-    spawnJetSki,
-    spawnForShot,
-    startRace,
-    isWaterAt,
-    waveHeight,
-    buoys: RACE_BUOYS,
-  };
-  if (Array.isArray(world.systems)) world.systems.push(sys);
-  return sys;
+  return { update, spawnJetSki, enterJetSki, exitJetSki, dock: DOCK, marina: MARINA };
 }
-
-export default createJetSki;
