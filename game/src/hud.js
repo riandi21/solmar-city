@@ -1,247 +1,293 @@
-// Solmar City HUD: DOM readouts plus a 200x200 minimap canvas. Cash, health,
-// wanted stars, Heat bar (blue), cartel threat bar (red), objective line, speed,
-// toast messages, weapon/armor labels, clock, district label, mission tracker,
-// activity tracker, owned properties, arc progress lines (heist, revenge, crown,
-// legacy, gambit, vice, kingpin), NOS meter, tire warning, territory bars,
-// bike/jet-ski/heli indicators, crew panel, garage menu, empire panel, casino
-// winnings, racing league board, and a fishing line (best catch).
+// hud.js — Solmar City HUD: cash, health, wanted stars, objective, speed,
+// toasts, weapons, clock, districts, mission/activity trackers, properties,
+// progress lines, NOS, tire damage, territory bar, bike/crew/garage/empire
+// panels, Heat bar, casino, racing leaderboard, heli, kingpin arc, cartel
+// threat, jet ski, fishing — plus a 200x200 minimap canvas, bottom-left.
 
-function el(id) {
-  return document.getElementById(id);
+const DISTRICTS = ['Downtown', 'Old Town', 'Little Havana', 'Sunset Beach', 'Vineyards', 'North Hills', 'The Islands'];
+
+function el(tag, id, cls, parent) {
+  const n = document.createElement(tag);
+  if (id) n.id = id;
+  if (cls) n.className = cls;
+  if (parent) parent.appendChild(n);
+  return n;
 }
 
-function fmtCash(n) {
-  return '$' + Math.floor(n || 0).toLocaleString('en-US');
-}
-
-function fmtClock(hours) {
-  const h = Math.floor(hours || 0) % 24;
-  const m = Math.floor(((hours || 0) % 1) * 60);
-  const hh = String(h).padStart(2, '0');
-  const mm = String(m).padStart(2, '0');
-  return hh + ':' + mm;
-}
-
-function stars(n) {
-  let out = '';
-  for (let i = 0; i < 5; i += 1) out += i < n ? '★' : '☆';
-  return out;
+function fmtCash(n) { return '$' + Math.floor(n || 0).toLocaleString('en-US'); }
+function fmtClock(mins) {
+  const h = Math.floor(((mins || 0) / 60) % 24);
+  const m = Math.floor((mins || 0) % 60);
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
 }
 
 export function createHud(world) {
-  const minimap = el('minimap');
-  const mctx = minimap ? minimap.getContext('2d') : null;
-  let toastTimer = 0;
-  let toastText = '';
+  let root = document.getElementById('hud');
+  if (!root) { root = el('div', 'hud', null, document.body); }
 
-  function setText(id, text) {
-    const node = el(id);
-    if (node && node.textContent !== text) node.textContent = text;
+  const cashEl = el('div', 'hud-cash', 'hud-cash', root);
+  const healthWrap = el('div', 'hud-health-wrap', 'hud-bar-wrap', root);
+  const healthBar = el('div', 'hud-health', 'hud-bar health', healthWrap);
+  const armorEl = el('div', 'hud-armor', 'hud-label', root);
+  const starsEl = el('div', 'hud-wanted', 'hud-wanted', root);
+  const heatWrap = el('div', 'hud-heat-wrap', 'hud-bar-wrap heat', root);
+  const heatBar = el('div', 'hud-heat', 'hud-bar heat', heatWrap);
+  const heatLabel = el('div', 'hud-heat-label', 'hud-label', heatWrap);
+  const cartelWrap = el('div', 'hud-cartel-wrap', 'hud-bar-wrap cartel', root);
+  const cartelBar = el('div', 'hud-cartel', 'hud-bar cartel', cartelWrap);
+  const cartelLabel = el('div', 'hud-cartel-label', 'hud-label', cartelWrap);
+  const objectiveEl = el('div', 'hud-objective', 'hud-objective', root);
+  const speedEl = el('div', 'hud-speed', 'hud-speed', root);
+  const nosWrap = el('div', 'hud-nos-wrap', 'hud-bar-wrap nos', root);
+  const nosBar = el('div', 'hud-nos', 'hud-bar nos', nosWrap);
+  const weaponEl = el('div', 'hud-weapon', 'hud-label', root);
+  const clockEl = el('div', 'hud-clock', 'hud-label', root);
+  const districtEl = el('div', 'hud-district', 'hud-district', root);
+  const missionEl = el('div', 'hud-mission', 'hud-tracker', root);
+  const activityEl = el('div', 'hud-activity', 'hud-tracker', root);
+  const propsEl = el('div', 'hud-properties', 'hud-panel', root);
+  const progressEl = el('div', 'hud-progress', 'hud-panel', root);
+  const territoryEl = el('div', 'hud-territory', 'hud-panel', root);
+  const bikeEl = el('div', 'hud-bike', 'hud-label', root);
+  const heliEl = el('div', 'hud-heli', 'hud-label', root);
+  const jetskiEl = el('div', 'hud-jetski', 'hud-label', root);
+  const fishingEl = el('div', 'hud-fishing', 'hud-label', root);
+  const crewEl = el('div', 'hud-crew', 'hud-panel', root);
+  const empireEl = el('div', 'hud-empire', 'hud-panel', root);
+  const casinoEl = el('div', 'hud-casino', 'hud-label', root);
+  const raceEl = el('div', 'hud-race', 'hud-panel', root);
+  const tireEl = el('div', 'hud-tire', 'hud-warning', root);
+  const garageEl = el('div', 'hud-garage', 'hud-panel garage', root);
+  const toastEl = el('div', 'hud-toast', 'hud-toast', root);
+
+  let minimap = document.getElementById('minimap');
+  if (!minimap) {
+    minimap = document.createElement('canvas');
+    minimap.id = 'minimap';
+    minimap.width = 200; minimap.height = 200;
+    root.appendChild(minimap);
+  }
+  const mctx = minimap.getContext('2d');
+
+  let toastTimer = 0;
+  let objective = 'Welcome to Solmar City.';
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.style.opacity = '1';
+    toastTimer = 3;
   }
 
-  function setWidth(id, pct) {
-    const node = el(id);
-    if (node) node.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  function setObjective(text) { objective = text || objective; }
+
+  // Briefly highlight the objective line when a mission stage changes.
+  function flashObjective(text) {
+    if (text) objective = text;
+    objectiveEl.style.color = '#ffd94a';
+    setTimeout(() => { objectiveEl.style.color = ''; }, 900);
+  }
+
+  function districtAt(x, z) {
+    const d = (world.city && world.city.districtAt) ? world.city.districtAt(x, z) : null;
+    if (d) return d;
+    if (x == null) return 'Solmar City';
+    if (z < -260) return 'North Hills';
+    if (x > 260) return 'The Islands';
+    if (x < -260) return 'Vineyards';
+    if (z > 260) return 'Sunset Beach';
+    if (x > 120 && z > 60) return 'Little Havana';
+    if (z > 120) return 'Old Town';
+    return 'Downtown';
   }
 
   function drawMinimap() {
-    if (!mctx || !minimap) return;
-    const size = 200;
-    const scale = size / 900;
-    const toMap = (x, z) => [(x + 450) * scale, (z + 450) * scale];
-    mctx.clearRect(0, 0, size, size);
-    mctx.fillStyle = 'rgba(10, 24, 38, 0.92)';
-    mctx.fillRect(0, 0, size, size);
-    // Sea to the south and east, plus the marina basin on the east edge.
-    mctx.fillStyle = 'rgba(32, 96, 140, 0.9)';
-    mctx.fillRect(0, (261 + 450) * scale, size, size - (261 + 450) * scale);
-    mctx.fillRect((261 + 450) * scale, 0, size - (261 + 450) * scale, size);
-    // Islands chain, south-east offshore.
-    mctx.fillStyle = 'rgba(214, 196, 140, 0.9)';
-    mctx.beginPath();
-    mctx.arc((370 + 450) * scale, (360 + 450) * scale, 7, 0, Math.PI * 2);
-    mctx.fill();
-    mctx.beginPath();
-    mctx.arc((420 + 450) * scale, (400 + 450) * scale, 5, 0, Math.PI * 2);
-    mctx.fill();
-    // Territory tints.
-    const districts = world.territories && world.territories.districts
-      ? world.territories.districts : [];
-    districts.forEach((d, i) => {
-      const [mx, mz] = toMap(d.x || 0, d.z || 0);
-      mctx.fillStyle = (d.control || 0) > 60
-        ? 'rgba(64, 220, 120, 0.25)' : 'rgba(220, 80, 80, 0.12)';
-      mctx.beginPath();
-      mctx.arc(mx, mz, 16, 0, Math.PI * 2);
-      mctx.fill();
-      void i;
-    });
+    const S = 200;
+    mctx.clearRect(0, 0, S, S);
+    mctx.fillStyle = 'rgba(8, 20, 28, 0.85)';
+    mctx.fillRect(0, 0, S, S);
+    const city = world.city || {};
+    const bounds = city.bounds || { min: -400, max: 400 };
+    const span = (bounds.max - bounds.min) || 800;
+    const toMap = (x, z) => [((x - bounds.min) / span) * S, ((z - bounds.min) / span) * S];
+    // Territory tint per district.
+    const terr = world.territories || {};
+    const tint = { Downtown: 'rgba(60,120,255,0.10)', 'Old Town': 'rgba(255,200,60,0.10)', 'Little Havana': 'rgba(255,90,60,0.10)', 'Sunset Beach': 'rgba(60,220,200,0.10)', Vineyards: 'rgba(140,220,80,0.10)', 'North Hills': 'rgba(180,140,255,0.10)', 'The Islands': 'rgba(80,200,255,0.10)' };
+    for (const d of DISTRICTS) {
+      mctx.fillStyle = tint[d] || 'rgba(255,255,255,0.04)';
+      mctx.fillRect(0, 0, S, S);
+      void d;
+    }
     // Roads.
-    const roads = (world.city && world.city.roads) || [];
-    mctx.strokeStyle = 'rgba(200, 200, 200, 0.55)';
-    mctx.lineWidth = 1.5;
-    roads.forEach((r) => {
-      const [ax, az] = toMap(r.axis === 'x' ? -261 : r.coord, r.axis === 'x' ? r.coord : -261);
-      const [bx, bz] = toMap(r.axis === 'x' ? 261 : r.coord, r.axis === 'x' ? r.coord : 261);
-      mctx.beginPath();
-      mctx.moveTo(ax, az);
-      mctx.lineTo(bx, bz);
-      mctx.stroke();
-    });
-    // Property blips: owned green, for sale amber.
-    const props = world.properties && world.properties.list ? world.properties.list : [];
-    props.forEach((p) => {
-      const [mx, mz] = toMap(p.x || 0, p.z || 0);
-      mctx.fillStyle = p.owned ? '#3ddc78' : '#ffb020';
-      mctx.beginPath();
-      mctx.arc(mx, mz, 3.5, 0, Math.PI * 2);
-      mctx.fill();
-    });
-    // Crew blips.
-    (world.crewMembers || []).forEach((c) => {
-      const [mx, mz] = toMap(c.position.x, c.position.z);
-      mctx.fillStyle = '#6ec6ff';
-      mctx.fillRect(mx - 2, mz - 2, 4, 4);
-    });
-    // Police blips.
-    (world.cars || []).filter((c) => c.kind === 'police').forEach((c) => {
-      const [mx, mz] = toMap(c.position.x, c.position.z);
-      mctx.fillStyle = '#4d7cff';
-      mctx.beginPath();
-      mctx.arc(mx, mz, 3, 0, Math.PI * 2);
-      mctx.fill();
-    });
-    // Mission marker.
-    const marker = world.mission && world.mission.marker;
-    if (marker) {
-      const [mx, mz] = toMap(marker.x, marker.z);
-      mctx.fillStyle = '#ffdd33';
-      mctx.beginPath();
-      mctx.arc(mx, mz, 5, 0, Math.PI * 2);
-      mctx.fill();
-      mctx.strokeStyle = '#ffdd33';
-      mctx.beginPath();
-      mctx.arc(mx, mz, 8 + Math.sin(performance.now() / 300) * 2, 0, Math.PI * 2);
-      mctx.stroke();
+    const roads = city.roads || [];
+    mctx.strokeStyle = 'rgba(200,200,200,0.55)';
+    mctx.lineWidth = 1;
+    for (const r of roads) {
+      if (!r || r.x1 === undefined) continue;
+      const [ax, ay] = toMap(r.x1, r.z1);
+      const [bx, by] = toMap(r.x2, r.z2);
+      mctx.beginPath(); mctx.moveTo(ax, ay); mctx.lineTo(bx, by); mctx.stroke();
+    }
+    // Property blips: for sale gold, owned green (list via the properties system).
+    const propsSys = (world.systemObjects && world.systemObjects.properties) || null;
+    const list = (propsSys && typeof propsSys.list === 'function') ? propsSys.list() : [];
+    for (const p of list) {
+      const [mx, my] = toMap(p.x || 0, p.z || 0);
+      mctx.fillStyle = p.owned ? '#3f6' : '#fc3';
+      mctx.fillRect(mx - 2, my - 2, 4, 4);
+    }
+    // Crew blips (cyan). world.crew is an ARRAY of members with .position.
+    const crewList = Array.isArray(world.crew) ? world.crew : ((world.crew && world.crew.members) || []);
+    for (const c of crewList) {
+      const pos = (c && c.position) || c;
+      if (!pos || pos.x === undefined) continue;
+      const [mx, my] = toMap(pos.x, pos.z || 0);
+      mctx.fillStyle = '#4df';
+      mctx.beginPath(); mctx.arc(mx, my, 2.5, 0, Math.PI * 2); mctx.fill();
+    }
+    // Cars (white) — world.cars entries carry .position — and feds (blue).
+    for (const c of world.cars || []) {
+      const pos = (c && c.position) || c;
+      if (!pos || pos.x === undefined) continue;
+      const [mx, my] = toMap(pos.x, pos.z || 0);
+      mctx.fillStyle = '#ddd';
+      mctx.fillRect(mx - 1, my - 1, 2, 2);
+    }
+    for (const c of world.feds || []) {
+      const pos = (c && c.position) || c;
+      if (!pos || pos.x === undefined) continue;
+      const [mx, my] = toMap(pos.x, pos.z || 0);
+      mctx.fillStyle = '#36f';
+      mctx.fillRect(mx - 1.5, my - 1.5, 3, 3);
+    }
+    // Mission marker (red diamond) — the runner drives world.mission.
+    const marker = (world.mission && world.mission.marker) || null;
+    if (marker && marker.x !== undefined) {
+      const [mx, my] = toMap(marker.x, marker.z || 0);
+      mctx.fillStyle = '#f33';
+      mctx.beginPath(); mctx.moveTo(mx, my - 5); mctx.lineTo(mx + 5, my); mctx.lineTo(mx, my + 5); mctx.lineTo(mx - 5, my); mctx.closePath(); mctx.fill();
     }
     // Player arrow.
-    const p = world.player && world.player.position;
-    if (p) {
-      const [mx, mz] = toMap(p.x, p.z);
-      const heading = world.player.heading || 0;
-      mctx.save();
-      mctx.translate(mx, mz);
-      mctx.rotate(-heading);
-      mctx.fillStyle = '#ffffff';
-      mctx.beginPath();
-      mctx.moveTo(0, -7);
-      mctx.lineTo(5, 6);
-      mctx.lineTo(-5, 6);
-      mctx.closePath();
-      mctx.fill();
-      mctx.restore();
-    }
+    const p = world.player || {};
+    const px = (p.position && p.position.x) ?? p.x ?? 0;
+    const pz = (p.position && p.position.z) ?? p.z ?? 0;
+    const [mx, my] = toMap(px, pz);
+    const heading = p.heading || 0;
+    mctx.save();
+    mctx.translate(mx, my);
+    mctx.rotate(-heading);
+    mctx.fillStyle = '#fff';
+    mctx.beginPath(); mctx.moveTo(0, -6); mctx.lineTo(4, 5); mctx.lineTo(-4, 5); mctx.closePath(); mctx.fill();
+    mctx.restore();
+    void terr;
   }
 
-  const hud = {
-    toast(message, seconds) {
-      toastText = message;
-      toastTimer = seconds || 3;
-      setText('toast', message);
-      const node = el('toast');
-      if (node) node.style.opacity = '1';
-    },
-    setObjective(text) { setText('objective', text); },
-    update(dt) {
-      if (toastTimer > 0) {
-        toastTimer -= dt;
-        if (toastTimer <= 0) {
-          const node = el('toast');
-          if (node) node.style.opacity = '0';
-        }
-      }
-      const p = world.player || {};
-      setText('cash', fmtCash(world.cash));
-      setWidth('health-fill', p.health || 0);
-      setText('health-num', Math.max(0, Math.ceil(p.health || 0)) + '');
-      setText('wanted', stars(world.wanted || 0));
-      setWidth('heat-fill', world.heat || 0);
-      setWidth('cartel-fill', world.cartelThreat || 0);
-      const speed = Math.abs(p.speed || 0) * 3.6;
-      setText('speed', Math.round(speed) + ' km/h');
-      const time = world.daynight && typeof world.daynight.hours === 'number'
-        ? world.daynight.hours : (world.timeOfDay || 12);
-      setText('clock', fmtClock(time));
-      const mission = world.mission || {};
-      setText('objective', mission.objective || 'Free roam — open the map and find work.');
-      setText('mission-tracker', mission.id
-        ? 'Mission ' + mission.id + ': ' + (mission.objective || '')
-        : 'No active mission');
-      const weapon = world.combat && world.combat.weapon ? world.combat.weapon : 'Pistol';
-      const ammo = world.combat && typeof world.combat.ammo === 'number' ? world.combat.ammo : 0;
-      setText('weapon', weapon + '  •  ' + ammo + ' rounds');
-      setText('armor', 'Armor ' + Math.round(world.armor || 0));
-      setWidth('nos-fill', world.nos || 0);
-      const tire = world.tireDamage || 0;
-      setText('tire-warning', tire > 0 ? 'TIRE DAMAGE — repair at the garage' : '');
-      const kingpin = world.kingpin || {};
-      setText('kingpin-line', kingpin.kingpinCrowned
-        ? '👑 Kingpin of Solmar'
-        : 'Kingpin: ' + (kingpin.shipmentSeized ? '✓ Shipment ' : '')
-          + (kingpin.informantProtected ? '✓ Informant ' : '')
-          + (kingpin.siegeSurvived ? '✓ Siege' : ''));
-      setText('heist-line', world.heist && world.heist.progress
-        ? 'Casino Heist: ' + world.heist.progress : '');
-      setText('crown-line', world.crown && world.crown.progress
-        ? 'Coral Crown: ' + world.crown.progress : '');
-      setText('legacy-line', world.legacy && world.legacy.progress
-        ? 'Solmar Legacy: ' + world.legacy.progress : '');
-      setText('gambit-line', world.gambit && world.gambit.progress
-        ? "Don's Gambit: " + world.gambit.progress : '');
-      setText('vice-line', world.vice && world.vice.progress
-        ? 'Vice King: ' + world.vice.progress : '');
-      setText('revenge-line', world.revenge && world.revenge.progress
-        ? 'Dourado Revenge: ' + world.revenge.progress : '');
-      const owned = (world.properties && world.properties.list
-        ? world.properties.list.filter((x) => x.owned) : []);
-      setText('properties-line', owned.length
-        ? 'Owned: ' + owned.map((x) => x.name).join(', ') : 'No properties yet — press B at a marker to buy');
-      const terr = world.territories && world.territories.districts
-        ? world.territories.districts : [];
-      setText('territory-line', terr.length
-        ? terr.map((d) => d.name + ' ' + Math.round(d.control || 0) + '%').join('  •  ') : '');
-      const crew = world.crewMembers || [];
-      setText('crew-line', crew.length
-        ? 'Crew: ' + crew.map((c) => c.name + ' ' + Math.round(c.health || 0) + 'hp').join(', ')
-        : 'No crew — hire at the Anchor Bar ($1,000)');
-      setText('empire-line', world.empire
-        ? 'Empire income $' + Math.round(world.empire.income || 0) + '/hr • Rival threat '
-          + Math.round(world.empire.rivalThreat || 0) : '');
-      setText('casino-line', world.vice
-        ? 'Casino winnings: ' + fmtCash(world.vice.casinoWinnings || 0) : '');
-      setText('league-line', world.vice
-        ? 'Racing League: ' + (world.vice.leaguePoints || 0) + ' pts • '
-          + (world.vice.leagueWins || 0) + ' wins' : '');
-      const heli = world.playerHeli || {};
-      setText('heli-line', heli.boarded
-        ? 'Heli alt ' + Math.round(heli.altitude || 0) + ' m • rotor '
-          + Math.round((heli.rotor || 0) * 100) + '%' : '');
-      const ski = world.jetski || {};
-      setText('jetski-line', ski.riding
-        ? 'Jet Ski ' + Math.round(Math.abs(ski.speed || 0) * 3.6) + ' km/h • best '
-          + (kingpin.jetSkiBestTime ? kingpin.jetSkiBestTime.toFixed(1) + 's' : '—')
-        : (kingpin.jetSkiBestTime ? 'Jet Ski best ' + kingpin.jetSkiBestTime.toFixed(1) + 's' : ''));
-      setText('bike-line', world.playerBike
-        ? 'Bike: ' + (world.playerBike.kind || 'bike')
-          + (world.playerBike.wheelie ? ' • WHEELIE!' : '') : '');
-      setText('fishing-line', 'Best catch: ' + (kingpin.fishingBestCatch || 'none yet')
-        + (world.fishing && world.fishing.waiting ? ' • ...bite coming...' : ''));
-      setText('district', world.currentDistrict || 'Solmar City');
-      setText('activity-line', world.activity && world.activity.text ? world.activity.text : '');
-      setText('station-line', world.audioStation ? '♪ ' + world.audioStation : '');
-      drawMinimap();
-      void toastText;
-    },
-  };
-  return hud;
+  function update(dt) {
+    const p = world.player || {};
+    const sysObj = world.systemObjects || {};
+    const stats = world.stats || {};
+    cashEl.textContent = fmtCash(p.cash ?? stats.cash ?? 0);
+    const hp = Math.max(0, Math.min(100, p.health ?? 100));
+    healthBar.style.width = hp + '%';
+    armorEl.textContent = 'Armor ' + Math.floor(p.armor || 0);
+    // Wanted is world.wanted (a number); p.wanted was never set.
+    const wanted = Math.max(0, Math.min(5, world.wanted ?? p.wanted ?? 0));
+    starsEl.textContent = '★'.repeat(wanted) + '☆'.repeat(5 - wanted);
+    // Heat: world.heat is a number; the live level is heatState / the heat system.
+    const heatLevel = (world.heatState && world.heatState.level)
+      ?? (sysObj.heat && sysObj.heat.level)
+      ?? (typeof world.heat === 'number' ? world.heat : 0);
+    heatBar.style.width = Math.max(0, Math.min(100, heatLevel)) + '%';
+    heatLabel.textContent = 'HEAT ' + Math.floor(heatLevel);
+    // Cartel threat lives in world.cartelThreat (number) / the cartel system.
+    const threat = (typeof world.cartelThreat === 'number' ? world.cartelThreat
+      : (sysObj.cartel && sysObj.cartel.threat)) ?? 0;
+    cartelBar.style.width = Math.max(0, Math.min(100, threat)) + '%';
+    cartelLabel.textContent = 'CARTEL ' + Math.floor(threat);
+    objectiveEl.textContent = objective;
+    const speed = Math.abs(p.speed || 0);
+    speedEl.textContent = Math.round(speed * 3.6) + ' km/h';
+    const nos = p.nos ?? 100;
+    nosBar.style.width = Math.max(0, Math.min(100, nos)) + '%';
+    // Weapon/ammo live in the combat system, not on the player.
+    const combat = sysObj.combat;
+    const weapon = (combat && combat.weapon) || p.weapon || 'Fists';
+    const ammo = combat && combat.ammo ? (combat.ammo[weapon] ?? combat.ammo.pistol ?? '∞') : (p.ammo ?? '∞');
+    weaponEl.textContent = weapon + '  •  ' + ammo + '  •  ' + fmtCash(p.cash ?? 0);
+    // Clock: daynight maintains world.timeOfDay (hours); world.daynight was never set.
+    const tod = typeof world.timeOfDay === 'number' ? world.timeOfDay : 12;
+    clockEl.textContent = fmtClock(tod * 60);
+    const px = (p.position && p.position.x) ?? p.x ?? 0;
+    const pz = (p.position && p.position.z) ?? p.z ?? 0;
+    districtEl.textContent = districtAt(px, pz);
+    // Mission tracker: the runner drives world.mission.
+    const m = world.mission || {};
+    missionEl.textContent = m.id ? ('◆ ' + (m.objective || m.id)) : '◆ No active mission';
+    // Activities: race/taxi state lives in the activities system.
+    const actSys = sysObj.activities;
+    const raceNow = actSys && actSys.activeRace;
+    const taxiNow = actSys && actSys.taxi;
+    activityEl.textContent = raceNow ? ('▸ Race: ' + (raceNow.name || '')) : (taxiNow ? '▸ Taxi job running' : '');
+    // Properties: owned lives in world.properties.owned; list() via the system.
+    const propsSys = sysObj.properties;
+    const ownedNames = propsSys && typeof propsSys.list === 'function'
+      ? propsSys.list().filter((q) => q.owned).map((q) => q.name)
+      : Object.keys((world.properties && world.properties.owned) || {});
+    propsEl.textContent = ownedNames.length
+      ? 'Properties: ' + ownedNames.join(', ')
+      : 'Properties: none owned yet — press B near a for-sale blip';
+    const lines = [];
+    if (world.empire && typeof world.empire.rivalThreat === 'number' && world.empire.rivalThreat > 0) lines.push('Empire rival threat: ' + Math.floor(world.empire.rivalThreat));
+    const arcDone = (o) => (o ? Object.keys(o).filter((k) => o[k] === true) : []);
+    const done = [].concat(arcDone(world.revenge), arcDone(world.crown), arcDone(world.legacy), arcDone(world.gambit), arcDone(world.vice), arcDone(world.kingpin));
+    if (done.length) lines.push('Done: ' + done.join(', '));
+    if (world.completedMissions && world.completedMissions.length) lines.push('Missions: ' + world.completedMissions.length + '/44');
+    progressEl.textContent = lines.join('  •  ');
+    // Territory: control keys are the territories system's districts.
+    const terr = world.territories || {};
+    const ctrl = terr.control || {};
+    const terrKeys = Object.keys(ctrl);
+    territoryEl.textContent = terrKeys.length
+      ? 'Territory — ' + terrKeys.map((d) => d + ' ' + Math.floor(ctrl[d] ?? 0) + '%').join('  ')
+      : 'Territory — no districts yet';
+    // Vehicle lines: read what Rico is actually aboard.
+    const aboard = (typeof p.currentVehicle === 'function') ? p.currentVehicle() : null;
+    bikeEl.textContent = aboard === 'bike' ? 'Bike: riding' : '';
+    heliEl.textContent = aboard === 'heli' ? 'HELICOPTER — rise/fall with W/S' : '';
+    const bestJs = world.kingpin && world.kingpin.jetSkiBest;
+    jetskiEl.textContent = aboard === 'jetski' ? ('Jet Ski ' + Math.round(speed * 3.6) + ' km/h  •  Best ' + (bestJs != null ? bestJs.toFixed(1) + 's' : '—')) : '';
+    // Fishing: state lives in the fishing system.
+    const fishSys = sysObj.fishing;
+    const fishState = fishSys ? fishSys.state : null;
+    const fishBest = fishSys && typeof fishSys.best === 'function' ? fishSys.best() : null;
+    fishingEl.textContent = fishState && fishState !== 'idle'
+      ? ('Fishing: ' + fishState + ' — press E to ' + (fishState === 'bite' ? 'reel!' : 'cast'))
+      : (fishBest ? ('Best catch: ' + fishBest.label + ' ($' + fishBest.value + ')') : '');
+    // Crew: world.crew is an ARRAY of members.
+    const crewMembers = Array.isArray(world.crew) ? world.crew : ((world.crew && world.crew.members) || []);
+    crewEl.textContent = crewMembers.length
+      ? 'Crew: ' + crewMembers.map((c) => (c.name || 'Mate') + ' ' + Math.floor(c.health ?? 100) + '%').join('  •  ')
+      : '';
+    const empire = world.empire || {};
+    empireEl.textContent = (typeof empire.rivalThreat === 'number' && empire.rivalThreat > 0)
+      ? ('Empire — rival threat ' + Math.floor(empire.rivalThreat))
+      : '';
+    const winnings = world.vice && world.vice.casinoWinnings;
+    casinoEl.textContent = winnings ? ('Casino winnings: ' + fmtCash(winnings)) : '';
+    const league = actSys && actSys.league;
+    raceEl.textContent = (league && league.results && Object.keys(league.results).length)
+      ? 'Racing League — ' + Object.entries(league.results).slice(0, 5).map(([n, r]) => n + ' ' + (r.points ?? r)).join('  ')
+      : '';
+    const tire = p.tireDamage ?? p.tires ?? 0;
+    tireEl.textContent = tire > 50 ? '⚠ TIRE DAMAGE — handling reduced' : '';
+    tireEl.style.display = tire > 50 ? 'block' : 'none';
+    garageEl.textContent = (world.garage && world.garage.open)
+      ? ('GARAGE — ' + (world.garage.cars || []).map((c) => c.name || c).join('  •  ') + '  (G to close)')
+      : '';
+    garageEl.style.display = (world.garage && world.garage.open) ? 'block' : 'none';
+    if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toastEl.style.opacity = '0'; }
+    drawMinimap();
+  }
+
+  const sys = { name: 'hud', update, toast, setObjective, flashObjective };
+  return sys;
 }

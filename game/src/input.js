@@ -1,136 +1,135 @@
-// Solmar City input: keyboard + mouse. Held keys live in `keys` (a Set of
-// event.code strings); one-shot presses live in `justPressed` until the frame
-// loop consumes them with takePressed(), so a press between two frames is never
-// lost and never counted twice. E is edge-triggered everywhere (entering the
-// player helicopter, fishing casts, shop buys) — holding E must never double-fire.
+// input.js — Solmar City input: keyboard + mouse for the full key set.
+// CRITICAL: every movement key is stored in BOTH forms — 'KeyW' and 'W',
+// 'KeyA'/'A', 'KeyS'/'S', 'KeyD'/'D', 'Space', 'ShiftLeft'/'Shift' —
+// because the game reads both forms in different systems.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+const DUAL_KEYS = {
+  KeyW: 'W', KeyA: 'A', KeyS: 'S', KeyD: 'D',
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Space: 'Space', ShiftLeft: 'Shift', ShiftRight: 'Shift',
+};
 
-const PAUSE_KEYS = new Set(['KeyP', 'Escape']);
-const CONFIRM_KEYS = new Set(['Space', 'Enter']);
+export function createInput(world) {
+  if (!world.input) world.input = { keys: new Set(), pressed: new Set(), mouse: { x: 0, y: 0, dx: 0, dy: 0, right: false, left: false } };
+  if (!world.input.keys) world.input.keys = new Set();
+  if (!world.input.pressed) world.input.pressed = new Set();
+  if (!world.input.mouse) world.input.mouse = { x: 0, y: 0, dx: 0, dy: 0, right: false, left: false };
 
-export function createInput(world, target) {
-  const keys = new Set();
-  const justPressed = new Set();
-  let actions = 0;
-  let mouseX = 0;
-  let mouseY = 0;
-  let mouseDown = false;
-  let mouseClicked = false;
-  let rightDown = false;
-  let rightClicked = false;
-  let wheelDelta = 0;
+  const keys = world.input.keys;
+  const pressed = world.input.pressed;
+  const mouse = world.input.mouse;
 
-  function onKeyDown(event) {
-    if (event.repeat) return;
-    keys.add(event.code);
-    justPressed.add(event.code);
-    if (PAUSE_KEYS.has(event.code)) actions |= ACTION_PAUSE;
-    if (CONFIRM_KEYS.has(event.code)) actions |= ACTION_CONFIRM;
-    // world.input may be a plain state object until the bootstrap swaps in
-    // the live key sets; guard so a stray keypress can never throw here.
-    if (world.input) {
-      if (event.code === 'KeyM') world.input.muteToggle = true;
-      if (event.code === 'KeyC') world.input.radioNext = true;
-    }
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
-      event.preventDefault();
-    }
+  function addKey(code) {
+    keys.add(code);
+    const dual = DUAL_KEYS[code];
+    if (dual) keys.add(dual);
+    // A bare single-letter code also gets its Key form, so 'W' adds 'KeyW'.
+    if (/^[WASD]$/.test(code)) keys.add('Key' + code);
+    if (code === 'Shift') { keys.add('ShiftLeft'); keys.add('ShiftRight'); }
   }
 
-  function onKeyUp(event) {
-    keys.delete(event.code);
+  function deleteKey(code) {
+    keys.delete(code);
+    const dual = DUAL_KEYS[code];
+    if (dual) keys.delete(dual);
+    if (/^[WASD]$/.test(code)) keys.delete('Key' + code);
+    if (code === 'Shift') { keys.delete('ShiftLeft'); keys.delete('ShiftRight'); }
   }
 
-  function onBlur() {
-    keys.clear();
-    mouseDown = false;
-    rightDown = false;
+  function onKeyDown(e) {
+    if (e.repeat) { addKey(e.code); return; }
+    addKey(e.code);
+    pressed.add(e.code);
+    const dual = DUAL_KEYS[e.code];
+    if (dual) pressed.add(dual);
+    if (/^[WASD]$/.test(e.code)) pressed.add('Key' + e.code);
+    // Game keys must not scroll the page or trigger browser shortcuts.
+    if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   }
 
-  function onMouseMove(event) {
-    mouseX = event.clientX;
-    mouseY = event.clientY;
+  function onKeyUp(e) {
+    deleteKey(e.code);
+    pressed.delete(e.code);
+    const dual = DUAL_KEYS[e.code];
+    if (dual) pressed.delete(dual);
   }
 
-  function onMouseDown(event) {
-    if (event.button === 0) {
-      mouseDown = true;
-      mouseClicked = true;
-    } else if (event.button === 2) {
-      rightDown = true;
-      rightClicked = true;
-    }
+  function onMouseMove(e) {
+    mouse.dx = e.movementX || 0;
+    mouse.dy = e.movementY || 0;
+    mouse.x = e.clientX; mouse.y = e.clientY;
   }
 
-  function onMouseUp(event) {
-    if (event.button === 0) mouseDown = false;
-    if (event.button === 2) rightDown = false;
+  function onMouseDown(e) {
+    if (e.button === 0) { mouse.left = true; pressed.add('MouseLeft'); keys.add('MouseLeft'); }
+    if (e.button === 2) { mouse.right = true; pressed.add('MouseRight'); keys.add('MouseRight'); } // right-click: sniper zoom
   }
 
-  function onWheel(event) {
-    wheelDelta += event.deltaY;
+  function onMouseUp(e) {
+    if (e.button === 0) { mouse.left = false; keys.delete('MouseLeft'); }
+    if (e.button === 2) { mouse.right = false; keys.delete('MouseRight'); }
   }
 
-  function onContextMenu(event) {
-    event.preventDefault();
-  }
+  function onContextMenu(e) { e.preventDefault(); }
+  function onBlur() { keys.clear(); pressed.clear(); mouse.left = false; mouse.right = false; }
 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('blur', onBlur);
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mousedown', onMouseDown);
   window.addEventListener('mouseup', onMouseUp);
-  window.addEventListener('wheel', onWheel);
-  if (target) {
-    target.addEventListener('contextmenu', onContextMenu);
-    target.addEventListener('pointerdown', () => { mouseClicked = true; });
+  window.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('blur', onBlur);
+
+  function isPressed(code) { return keys.has(code); }
+  function wasPressed(code) { return pressed.has(code); }
+  function axis() {
+    let x = 0, y = 0;
+    if (keys.has('KeyW') || keys.has('W') || keys.has('ArrowUp')) y += 1;
+    if (keys.has('KeyS') || keys.has('S') || keys.has('ArrowDown')) y -= 1;
+    if (keys.has('KeyD') || keys.has('D') || keys.has('ArrowRight')) x += 1;
+    if (keys.has('KeyA') || keys.has('A') || keys.has('ArrowLeft')) x -= 1;
+    return { x, y };
   }
 
-  const input = {
-    keys,
-    justPressed,
-    get mouseX() { return mouseX; },
-    get mouseY() { return mouseY; },
-    get mouseDown() { return mouseDown; },
-    get rightDown() { return rightDown; },
-    get wheelDelta() { return wheelDelta; },
-    isDown(code) { return keys.has(code); },
-    // Edge-triggered: true only on the frame the key went down.
-    pressed(code) { return justPressed.has(code); },
-    // Click edge: true once per mouse press, consumed by the caller.
-    takeClick() {
-      const clicked = mouseClicked;
-      mouseClicked = false;
-      return clicked;
-    },
-    takeRightClick() {
-      const clicked = rightClicked;
-      rightClicked = false;
-      return clicked;
-    },
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-    // Called at the end of each frame: one-shot presses expire.
-    endFrame() {
-      justPressed.clear();
-      wheelDelta = 0;
-    },
-    destroy() {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-      window.removeEventListener('blur', onBlur);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mousedown', onMouseDown);
-      window.removeEventListener('mouseup', onMouseUp);
-      window.removeEventListener('wheel', onWheel);
-      if (target) target.removeEventListener('contextmenu', onContextMenu);
+  function update(dt) {
+    void dt;
+    // Edge-triggered presses live for exactly one frame.
+    pressed.clear();
+    mouse.dx = 0; mouse.dy = 0;
+    world.input.isPressed = isPressed;
+    world.input.wasPressed = wasPressed;
+    world.input.axis = axis;
+  }
+
+  // Full reset (used on respawn and when the menu re-opens).
+  function reset() {
+    keys.clear();
+    pressed.clear();
+    mouse.left = false; mouse.right = false;
+    mouse.dx = 0; mouse.dy = 0;
+  }
+
+  const sys = {
+    name: 'input',
+    update,
+    isPressed,
+    wasPressed,
+    axis,
+    reset,
+    get keys() { return keys; },
+    get mouse() { return mouse; },
+    // Full key reference for the help screen / HUD.
+    bindings: {
+      move: 'W A S D / arrows', sprint: 'Shift', jump: 'Space',
+      enterVehicle: 'F / E', punch: 'Q', weapons: '1-5, R reload',
+      radio: 'C', mute: 'M', pause: 'P', nos: 'Shift while driving',
+      wheelie: 'Shift while biking', hydraulics: 'H in a Lowrider',
+      buyProperty: 'B', garage: 'G', interact: 'E', sniperZoom: 'Right-click',
     },
   };
-  return input;
+  world.input.isPressed = isPressed;
+  world.input.wasPressed = wasPressed;
+  world.input.axis = axis;
+  return sys;
 }

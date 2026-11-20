@@ -1,291 +1,272 @@
-// Combat — punching, shooting, enemy shooters for Solmar City.
-// Weapons: pistol, SMG (3-round burst), shotgun (5 pellets), rifle,
-// sniper (long range, scope zoom on right-click). Ammo is scarce: refill
-// only at shops and on mission start, never free in the field.
 import * as THREE from 'three';
 
-const WEAPONS = {
-  pistol: { damage: 25, range: 45, rate: 0.28, ammo: 60, pellets: 1, spread: 0.02, auto: false },
-  smg: { damage: 14, range: 38, rate: 0.09, ammo: 90, pellets: 1, burst: 3, spread: 0.06, auto: true },
-  shotgun: { damage: 12, range: 22, rate: 0.8, ammo: 24, pellets: 5, spread: 0.14, auto: false },
-  rifle: { damage: 40, range: 70, rate: 0.16, ammo: 48, pellets: 1, spread: 0.01, auto: true },
-  sniper: { damage: 95, range: 140, rate: 1.1, ammo: 12, pellets: 1, spread: 0.001, auto: false, zoom: true },
-};
-const ORDER = ['pistol', 'smg', 'shotgun', 'rifle', 'sniper'];
-
-function vec(x = 0, y = 0, z = 0) { return new THREE.Vector3(x, y, z); }
-function px(p) { return p && typeof p.x === 'number' ? p.x : 0; }
-function pz(p) { return p && typeof p.z === 'number' ? p.z : 0; }
-function dist3D(a, b) {
-  return Math.hypot(px(a) - px(b), (a.y || 0) - (b.y || 0), pz(a) - pz(b));
-}
-
+// Combat: melee, weapons, ammo, rival shooters, crew fire, feds, hitmen.
+// Fresh implementation for Round 16.
+// CRITICAL: spawnShooter pushes to world.enemies AND world.gangShooters so
+// fight/defend mission stages advance when enemies are defeated.
 export function createCombat(scene, world) {
-  const w = world || {};
-  // The mission runner reads these lists: they must be the live lists on
-  // the world, never a private copy.
-  if (!Array.isArray(w.enemies)) w.enemies = [];
-  if (!Array.isArray(w.gangShooters)) w.gangShooters = [];
-  if (!Array.isArray(w.federalAgents)) w.federalAgents = [];
-  if (!Array.isArray(w.cartelHitmen)) w.cartelHitmen = [];
-  const state = {
-    weapon: 'pistol',
-    ammo: { pistol: 60, smg: 90, shotgun: 24, rifle: 48, sniper: 12 },
-    cooldown: 0,
-    scoped: false,
-    spawnedTotal: 0,
-    defeatedTotal: 0,
-    shooters: [],
-    // A fight stage only counts as clear when a group was actually
-    // populated and every member of it is now gone — never on a list
-    // that started empty.
-    fightPopulated: false,
+  const WEAPONS = {
+    pistol: { name: 'pistol', damage: 25, range: 60, rate: 0.28, burst: 1, pellets: 1, spread: 0.02, zoom: 1, auto: false },
+    smg: { name: 'smg', damage: 12, range: 45, rate: 0.09, burst: 3, pellets: 1, spread: 0.06, zoom: 1, auto: true },
+    shotgun: { name: 'shotgun', damage: 14, range: 25, rate: 0.8, burst: 1, pellets: 5, spread: 0.12, zoom: 1, auto: false },
+    rifle: { name: 'rifle', damage: 34, range: 90, rate: 0.16, burst: 1, pellets: 1, spread: 0.015, zoom: 1, auto: true },
+    sniper: { name: 'sniper', damage: 90, range: 220, rate: 1.1, burst: 1, pellets: 1, spread: 0.001, zoom: 3, auto: false },
   };
-  if (!w.combat) w.combat = state;
+  const AMMO_MAX = { pistol: 120, smg: 180, shotgun: 40, rifle: 150, sniper: 20 };
 
-  function makeShooterMesh(color, tough) {
-    if (!scene) return null;
-    const group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(0.7, 1.1, 0.4),
-      new THREE.MeshStandardMaterial({ color }),
-    );
-    body.position.y = 1.0;
-    group.add(body);
-    const head = new THREE.Mesh(
-      new THREE.SphereGeometry(0.26, 10, 8),
-      new THREE.MeshStandardMaterial({ color: 0xd9a066 }),
-    );
-    head.position.y = 1.85;
-    group.add(head);
-    const gun = new THREE.Mesh(
-      new THREE.BoxGeometry(0.12, 0.12, 0.7),
-      new THREE.MeshStandardMaterial({ color: 0x222222 }),
-    );
-    gun.position.set(0.3, 1.2, 0.35);
-    group.add(gun);
-    if (tough) {
-      const vest = new THREE.Mesh(
-        new THREE.BoxGeometry(0.8, 0.6, 0.5),
-        new THREE.MeshStandardMaterial({ color: 0x111111 }),
-      );
-      vest.position.y = 1.05;
-      group.add(vest);
-    }
-    scene.add(group);
-    return group;
+  let current = 'pistol';
+  let ammo = { pistol: 60, smg: 90, shotgun: 16, rifle: 60, sniper: 8 };
+  let cooldown = 0;
+  let burstLeft = 0;
+  let burstTimer = 0;
+  let scoped = false;
+  let punchCooldown = 0;
+  let crewFireTimer = 0;
+  const shooters = []; // internal list only; world lists are authoritative for stages
+
+  function refillAmmo() {
+    for (const k of Object.keys(AMMO_MAX)) ammo[k] = AMMO_MAX[k];
   }
 
-  function nearestCover(pos, from) {
-    // Gang shooters take cover behind cars and buildings and flank
-    // instead of standing in the open.
-    const cars = Array.isArray(w.cars) ? w.cars : [];
-    let best = null; let bestD = Infinity;
-    for (const car of cars) {
-      if (!car || !car.position) continue;
-      const d = dist3D(car.position, from);
-      if (d < bestD && d > 4) { bestD = d; best = car.position; }
-    }
-    if (best) return { x: px(best), z: pz(best) };
-    const dx = px(pos) - px(from); const dz = pz(pos) - pz(from);
-    const len = Math.hypot(dx, dz) || 1;
-    return { x: px(pos) + (dx / len) * 6, z: pz(pos) + (dz / len) * 6 };
-  }
-
-  // Mandatory: push to world.enemies AND world.gangShooters as well as
-  // the internal list, so fight/defend stages advance on real kills.
-  function spawnShooter(x, z, options = {}) {
-    const kind = options.kind || 'gang';
-    const tough = kind === 'federal' || kind === 'cartel';
-    const shooter = {
-      kind,
-      position: vec(x, 0, z),
-      heading: 0,
-      health: options.health || (kind === 'cartel' ? 130 : kind === 'federal' ? 120 : 60),
-      maxHealth: options.health || (kind === 'cartel' ? 130 : kind === 'federal' ? 120 : 60),
-      accuracy: kind === 'cartel' ? 0.42 : kind === 'federal' ? 0.38 : 0.22,
-      damage: kind === 'cartel' ? 14 : kind === 'federal' ? 13 : 8,
-      shootTimer: 1 + Math.random() * 1.5,
-      state: 'fight',
-      cover: null,
-      flankSide: Math.random() < 0.5 ? -1 : 1,
-      alive: true,
-      mesh: makeShooterMesh(kind === 'cartel' ? 0x881111 : kind === 'federal' ? 0x111111 : 0x335522, tough),
-    };
-    if (shooter.mesh) shooter.mesh.position.copy(shooter.position);
-    state.shooters.push(shooter);
-    w.enemies.push(shooter);
-    w.gangShooters.push(shooter);
-    if (kind === 'federal') w.federalAgents.push(shooter);
-    if (kind === 'cartel') w.cartelHitmen.push(shooter);
-    state.spawnedTotal += 1;
-    state.fightPopulated = true;
-    return shooter;
-  }
-
-  function spawnSquad(x, z, count, kind = 'gang') {
-    const squad = [];
-    for (let i = 0; i < count; i += 1) {
-      squad.push(spawnShooter(x + (i - (count - 1) / 2) * 3, z + (i % 2) * 2, { kind }));
-    }
-    return squad;
-  }
-
-  function removeShooter(shooter) {
-    for (const list of [state.shooters, w.enemies, w.gangShooters, w.federalAgents, w.cartelHitmen]) {
-      const i = list.indexOf(shooter);
-      if (i >= 0) list.splice(i, 1);
-    }
-    if (shooter.mesh && shooter.mesh.parent) shooter.mesh.parent.remove(shooter.mesh);
-    state.defeatedTotal += 1;
-  }
-
-  function damageShooter(shooter, amount) {
-    if (!shooter || !shooter.alive) return false;
-    shooter.health -= amount;
-    if (shooter.health <= 0) {
-      shooter.alive = false;
-      removeShooter(shooter);
-      return true;
-    }
-    return false;
-  }
-
-  // True only when a fight was actually populated and nothing of it is
-  // left alive. An empty list that was never populated returns false.
-  function fightClear() {
-    if (!state.fightPopulated) return false;
-    return w.enemies.length === 0 && w.gangShooters.length === 0;
-  }
-  function allDefeated() { return fightClear(); }
-  // How many shooters of a kind are still standing (for HUD / stages).
-  function aliveCount(kind) {
-    return state.shooters.filter((s) => s.alive && (!kind || s.kind === kind)).length;
-  }
-  function weaponInfo(name) {
-    return WEAPONS[name || state.weapon] || null;
-  }
-
-  function playerPos() {
-    return w.player && w.player.position ? w.player.position : { x: 0, y: 0, z: 0 };
-  }
-
-  function punch() {
-    const p = playerPos();
-    let hits = 0;
-    for (const e of [...w.enemies]) {
-      if (dist3D(e.position, p) < 2.2) {
-        const dx = px(e.position) - px(p); const dz = pz(e.position) - pz(p);
-        const len = Math.hypot(dx, dz) || 1;
-        e.position.x += (dx / len) * 3; e.position.z += (dz / len) * 3;
-        damageShooter(e, 20);
-        hits += 1;
-      }
-    }
-    for (const ped of Array.isArray(w.pedestrians) ? w.pedestrians : []) {
-      if (ped && ped.position && dist3D(ped.position, p) < 2.2) {
-        ped.state = 'flee';
-        const dx = px(ped.position) - px(p); const dz = pz(ped.position) - pz(p);
-        const len = Math.hypot(dx, dz) || 1;
-        ped.position.x += (dx / len) * 4; ped.position.z += (dz / len) * 4;
-      }
-    }
-    return hits;
-  }
-
-  function shoot(targetPoint) {
-    const def = WEAPONS[state.weapon];
-    if (state.cooldown > 0 || state.ammo[state.weapon] <= 0) return null;
-    state.ammo[state.weapon] -= 1;
-    state.cooldown = def.rate;
-    const p = playerPos();
-    const aim = targetPoint || { x: px(p), y: 1.2, z: pz(p) - 10 };
-    let best = null; let bestD = Infinity;
-    for (const e of [...w.enemies]) {
-      const d = dist3D(e.position, aim);
-      if (d < 3 && dist3D(e.position, p) <= def.range && d < bestD) { best = e; bestD = d; }
-    }
-    // Shotgun fires 5 pellets: extra close-range hits on the same target.
-    let killed = false;
-    if (best) {
-      killed = damageShooter(best, def.damage * def.pellets);
-    }
-    return { weapon: state.weapon, hit: !!best, killed, ammoLeft: state.ammo[state.weapon] };
+  // Shops / mission start top ammo up; field pickups never refill for free.
+  function addAmmo(name, n) {
+    if (!AMMO_MAX[name] || typeof n !== 'number') return ammo[name] || 0;
+    ammo[name] = Math.min(AMMO_MAX[name], (ammo[name] || 0) + n);
+    return ammo[name];
   }
 
   function switchWeapon(name) {
-    if (WEAPONS[name]) { state.weapon = name; state.scoped = false; return true; }
-    return false;
-  }
-  function cycleWeapon(dir = 1) {
-    const i = ORDER.indexOf(state.weapon);
-    state.weapon = ORDER[(i + dir + ORDER.length) % ORDER.length];
-    state.scoped = false;
-    return state.weapon;
-  }
-  function refillAmmo() {
-    for (const name of ORDER) state.ammo[name] = WEAPONS[name].ammo;
-  }
-  function setScoped(on) {
-    state.scoped = state.weapon === 'sniper' ? !!on : false;
-    return state.scoped;
+    if (!WEAPONS[name]) return false;
+    current = name;
+    burstLeft = 0;
+    if (world.events) world.events.push({ type: 'weapon-switch', weapon: name });
+    return true;
   }
 
-  function update(dt) {
-    if (state.cooldown > 0) state.cooldown = Math.max(0, state.cooldown - dt);
-    if (w.mode !== 'play') return;
-    const p = playerPos();
-    for (const s of [...state.shooters]) {
-      if (!s.alive) continue;
-      s.shootTimer -= dt;
-      const d = dist3D(s.position, p);
-      // Take cover, then flank: sidestep around the player instead of
-      // standing in the open.
-      if (!s.cover || d < 8) s.cover = nearestCover(s.position, p);
-      const cx = s.cover.x - px(s.position);
-      const cz = s.cover.z - pz(s.position);
-      const cl = Math.hypot(cx, cz);
-      if (cl > 1.5) {
-        const sp = 3.2;
-        s.position.x += (cx / cl) * sp * dt;
-        s.position.z += (cz / cl) * sp * dt;
-      } else {
-        // Flank step sideways while holding cover.
-        s.position.x += s.flankSide * 1.2 * dt;
+  function aimTarget(origin, dir, range, damage, shooter) {
+    // Hitscan against enemies / feds / hitmen / gang shooters.
+    const pools = [world.enemies, world.gangShooters, world.feds, world.cartelHitmen];
+    let best = null;
+    let bestT = range;
+    for (const pool of pools) {
+      if (!pool) continue;
+      for (const e of pool) {
+        if (!e || !e.position || e.health <= 0 || e === shooter) continue;
+        const to = new THREE.Vector3(e.position.x - origin.x, (e.position.y || 1) - origin.y, e.position.z - origin.z);
+        const t = to.dot(dir);
+        if (t < 0 || t > bestT) continue;
+        const perp = to.clone().addScaledVector(dir, -t).length();
+        if (perp < 1.6) { best = e; bestT = t; }
       }
-      s.heading = Math.atan2(px(p) - px(s.position), pz(p) - pz(s.position));
-      if (s.mesh) { s.mesh.position.copy(s.position); s.mesh.rotation.y = s.heading; }
-      if (s.shootTimer <= 0 && d < 55) {
-        s.shootTimer = 1.4 + Math.random() * 1.2;
-        // Simple inaccurate hitscan.
-        if (Math.random() < s.accuracy) {
-          if (w.player && typeof w.player.health === 'number') {
-            w.player.health = Math.max(0, w.player.health - s.damage);
-            if (typeof w.toast === 'function' && w.player.health <= 25) w.toast('Health critical!');
-          }
+    }
+    if (best) {
+      best.health -= damage;
+      if (best.health <= 0) {
+        best.state = 'dead';
+        if (world.events) world.events.push({ type: 'enemy-down', kind: best.kind || 'enemy' });
+      }
+      return best;
+    }
+    return null;
+  }
+
+  function fireOnce() {
+    const w = WEAPONS[current];
+    if (ammo[current] <= 0) {
+      if (world.events) world.events.push({ type: 'dry-fire', weapon: current });
+      return false;
+    }
+    ammo[current] -= 1;
+    const p = world.player.position;
+    const origin = new THREE.Vector3(p.x, 1.5, p.z);
+    const yaw = world.player.heading || 0;
+    const dir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).normalize();
+    for (let i = 0; i < w.pellets; i++) {
+      const d = dir.clone();
+      d.x += (Math.random() - 0.5) * w.spread * 2;
+      d.z += (Math.random() - 0.5) * w.spread * 2;
+      d.normalize();
+      aimTarget(origin, d, w.range, w.damage, world.player);
+    }
+    if (world.events) world.events.push({ type: 'shot', weapon: current });
+    return true;
+  }
+
+  function shoot() {
+    if (cooldown > 0) return false;
+    const w = WEAPONS[current];
+    if (ammo[current] <= 0) return fireOnce();
+    burstLeft = w.burst;
+    burstTimer = 0;
+    cooldown = w.rate;
+    return fireOnce();
+  }
+
+  function punch() {
+    if (punchCooldown > 0) return false;
+    if (world.player.inVehicle) return false; // on foot only
+    punchCooldown = 0.5;
+    const p = world.player.position;
+    const yaw = world.player.heading || 0;
+    const fx = Math.sin(yaw);
+    const fz = Math.cos(yaw);
+    let hit = false;
+    for (const pool of [world.enemies, world.gangShooters]) {
+      if (!pool) continue;
+      for (const e of pool) {
+        if (!e || !e.position || e.health <= 0) continue;
+        const dx = e.position.x - p.x;
+        const dz = e.position.z - p.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 2.4) {
+          e.health -= 20;
+          // Knockback away from the player.
+          const k = d > 0.01 ? 1 / d : 1;
+          e.position.x += dx * k * 2.5;
+          e.position.z += dz * k * 2.5;
+          if (e.health <= 0) e.state = 'dead';
+          hit = true;
         }
       }
-      // Crew shoot back with pistols.
-      for (const m of Array.isArray(w.crew) ? w.crew : []) {
-        if (m && m.state === 'fight' && Math.random() < dt * 0.5) damageShooter(s, 10);
-      }
+    }
+    if (world.events) world.events.push({ type: 'punch', hit });
+    return hit;
+  }
+
+  function spawnShooter(x, z, kind = 'gang') {
+    const health = kind === 'fed' ? 150 : kind === 'hitman' ? 140 : 80;
+    const accuracy = kind === 'fed' ? 0.55 : kind === 'hitman' ? 0.5 : 0.28;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.7, 1.8, 0.7),
+      new THREE.MeshStandardMaterial({ color: kind === 'fed' ? 0x0f172a : kind === 'hitman' ? 0x7f1d1d : 0x3f6212 })
+    );
+    mesh.position.set(x, 0.9, z);
+    if (scene && scene.add) scene.add(mesh);
+    const s = {
+      mesh, position: mesh.position, health, kind,
+      accuracy, state: 'chase', fireTimer: 1 + Math.random(),
+      cover: null, flankSide: Math.random() < 0.5 ? -1 : 1,
+    };
+    shooters.push(s);
+    // Authoritative lists: fight/defend stages read these.
+    if (!world.enemies) world.enemies = [];
+    if (!world.gangShooters) world.gangShooters = [];
+    world.enemies.push(s);
+    world.gangShooters.push(s);
+    if (kind === 'fed') {
+      if (!world.feds) world.feds = [];
+      world.feds.push(s);
+    }
+    if (kind === 'hitman') {
+      if (!world.cartelHitmen) world.cartelHitmen = [];
+      world.cartelHitmen.push(s);
+    }
+    return s;
+  }
+
+  function shooterFire(s, dt) {
+    s.fireTimer -= dt;
+    if (s.fireTimer > 0) return;
+    s.fireTimer = s.kind === 'gang' ? 1.4 + Math.random() : 0.9 + Math.random() * 0.6;
+    const p = world.player.position;
+    const d = Math.hypot(s.position.x - p.x, s.position.z - p.z);
+    if (d > 55) return;
+    // Inaccurate hitscan for gang shooters; feds/hitmen are better.
+    if (Math.random() < s.accuracy * Math.max(0.3, 1 - d / 90)) {
+      const dmg = s.kind === 'gang' ? 6 : s.kind === 'fed' ? 12 : 11;
+      world.player.health = Math.max(0, (world.player.health || 100) - dmg);
+      if (world.events) world.events.push({ type: 'player-hit', by: s.kind, dmg });
     }
   }
 
-  function resetFight() {
-    for (const s of [...state.shooters]) removeShooter(s);
-    state.fightPopulated = false;
+  function shooterMove(s, dt) {
+    const p = world.player.position;
+    const dx = p.x - s.position.x;
+    const dz = p.z - s.position.z;
+    const d = Math.hypot(dx, dz) || 1;
+    if (s.kind === 'gang') {
+      // Gang shooters take cover / flank: strafe sideways while closing.
+      if (d > 18) {
+        s.position.x += (dx / d) * 4 * dt + s.flankSide * 2 * dt;
+        s.position.z += (dz / d) * 4 * dt;
+      } else {
+        s.position.x += s.flankSide * 3 * dt;
+        s.position.z += Math.sin(world.elapsed * 2 + s.flankSide) * 1.5 * dt;
+      }
+    } else {
+      // Feds and hitmen coordinate in pairs: one advances, one holds fire.
+      const pair = shooters.find(o => o !== s && o.kind === s.kind && o.health > 0);
+      const advance = !pair || (Math.floor(world.elapsed / 3) % 2 === 0) === (shooters.indexOf(s) % 2 === 0);
+      if (d > 14 && advance) {
+        s.position.x += (dx / d) * 5 * dt;
+        s.position.z += (dz / d) * 5 * dt;
+      }
+    }
+    if (s.mesh) s.mesh.lookAt(p.x, s.position.y, p.z);
   }
 
-  const api = {
-    update, spawnShooter, spawnSquad, damageShooter, removeShooter,
-    punch, shoot, switchWeapon, cycleWeapon, refillAmmo, setScoped,
-    fightClear, allDefeated, aliveCount, weaponInfo, resetFight, state, weapons: WEAPONS,
-    get weapon() { return state.weapon; },
-    get ammo() { return state.ammo; },
-  };
-  if (Array.isArray(w.systems)) w.systems.push(api);
-  return api;
-}
+  function update(dt) {
+    cooldown = Math.max(0, cooldown - dt);
+    punchCooldown = Math.max(0, punchCooldown - dt);
+    if (burstLeft > 0) {
+      burstTimer -= dt;
+      if (burstTimer <= 0) {
+        burstTimer = 0.07;
+        burstLeft -= 1;
+        fireOnce();
+      }
+    }
+    // Scope zoom on right-click (sniper).
+    if (world.input) {
+      const wantScope = !!world.input.rightMouse && current === 'sniper';
+      if (wantScope !== scoped) {
+        scoped = wantScope;
+        if (world.events) world.events.push({ type: 'scope', on: scoped });
+      }
+      if (world.input.keys && world.input.keys['KeyF']) punch();
+    }
+    // Crew members shoot alongside the player with pistols.
+    crewFireTimer -= dt;
+    if (crewFireTimer <= 0) {
+      crewFireTimer = 0.5;
+      for (const m of world.crew || []) {
+        if (!m || !m.position || m.health <= 0) continue;
+        let target = null;
+        let bestD = 40;
+        for (const e of world.enemies || []) {
+          if (!e || !e.position || e.health <= 0) continue;
+          const d = Math.hypot(e.position.x - m.position.x, e.position.z - m.position.z);
+          if (d < bestD) { bestD = d; target = e; }
+        }
+        if (target && Math.random() < 0.5) {
+          target.health -= 12;
+          if (target.health <= 0) target.state = 'dead';
+        }
+      }
+    }
+    // Move + fire live shooters; prune the dead from world lists.
+    for (let i = shooters.length - 1; i >= 0; i--) {
+      const s = shooters[i];
+      if (!s || s.health <= 0) {
+        if (s && s.mesh && scene && scene.remove) scene.remove(s.mesh);
+        shooters.splice(i, 1);
+        continue;
+      }
+      shooterMove(s, dt);
+      shooterFire(s, dt);
+    }
+    // NOTE: a fight-kind stage must advance only when the enemy list for
+    // that stage is genuinely empty — never auto-advance on an empty list
+    // that was never populated. This system never emits stage-complete
+    // events itself; mission code owns that check.
+  }
 
-export default createCombat;
+  return {
+    update, spawnShooter, shoot, switchWeapon, punch,
+    refillAmmo, addAmmo,
+    get weapon() { return current; },
+    get ammo() { return ammo; },
+    get scoped() { return scoped; },
+    weapons: WEAPONS,
+  };
+}

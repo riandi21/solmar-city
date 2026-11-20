@@ -1,143 +1,160 @@
-// Empire — Rico's protection racket for Solmar City.
-// After the Coral Crown arc Rico runs the city: six businesses pay
-// protection money, crew can be posted to guard districts, and a rival
-// family's threat rises over time and after Legacy missions. At high
-// threat, rival squads attack a controlled district.
-import * as THREE from 'three';
+// Empire: Rico runs the city after the Coral Crown arc. Protection money,
+// crew posts, rival family threat. Fresh implementation for Round 16.
+export function createEmpire(world) {
+  const BUSINESSES = [
+    { name: 'Anchor Bar', pay: 400, x: -20, z: 30 },
+    { name: 'Coral Taxi Depot', pay: 300, x: 60, z: -40 },
+    { name: 'Beachfront House', pay: 350, x: 90, z: 80 },
+    { name: 'casino', pay: 400, x: -60, z: -70 },
+    { name: 'bike shop', pay: 150, x: 30, z: 60 },
+    { name: 'Islands beach bar', pay: 250, x: 120, z: -10 },
+  ];
 
-export const BUSINESSES = [
-  { name: 'Anchor Bar', x: 100, z: 60, payout: 150 },
-  { name: 'Coral Taxi Depot', x: 80, z: 140, payout: 200 },
-  { name: 'Beachfront House', x: 30, z: 280, payout: 300 },
-  { name: 'Casino', x: 150, z: -60, payout: 400 },
-  { name: 'Bike Shop', x: 60, z: 270, payout: 180 },
-  { name: 'Islands Beach Bar', x: 370, z: 360, payout: 250 },
-];
-const COLLECT_COOLDOWN = 3600; // 1 in-game hour per business
-const THREAT_ATTACK_AT = 70;
+  if (!world.empire) world.empire = { protection: {}, crewPosts: {}, rivalThreat: 0 };
+  const e = world.empire;
+  if (!e.protection) e.protection = {};
+  if (!e.crewPosts) e.crewPosts = {};
+  if (typeof e.rivalThreat !== 'number') e.rivalThreat = 0;
 
-export function createEmpire(scene, world) {
-  const w = world || {};
-  if (!w.empire || typeof w.empire !== 'object' || Array.isArray(w.empire)) {
-    w.empire = { income: 0, threat: 10, posts: {}, collectedAt: {}, lastAttackAt: 0 };
-  }
-  const e = w.empire;
-  if (typeof e.income !== 'number') e.income = 0;
-  if (typeof e.threat !== 'number') e.threat = 10;
-  if (!e.posts || typeof e.posts !== 'object') e.posts = {};
-  if (!e.collectedAt || typeof e.collectedAt !== 'object') e.collectedAt = {};
-  if (typeof e.lastAttackAt !== 'number') e.lastAttackAt = 0;
-  const state = { menuOpen: false, lastAttackDistrict: null };
+  let lastHour = typeof world.hourOfDay === 'number' ? world.hourOfDay : 0;
+  let threatTimer = 0;
 
-  function businessAt(x, z, radius = 8) {
-    let best = null; let bestD = Infinity;
-    for (const b of BUSINESSES) {
-      const d = Math.hypot(x - b.x, z - b.z);
-      if (d < radius && d < bestD) { bestD = d; best = b; }
-    }
-    return best;
+  function businessByName(name) {
+    return BUSINESSES.find(b => b.name === name);
   }
 
-  // Press E at a business marker to collect its protection money.
-  function collectProtection(name) {
-    const b = BUSINESSES.find((item) => item.name === name);
+  function collectProtection(business) {
+    const b = businessByName(business);
     if (!b) return 0;
-    const now = w.elapsed || 0;
-    const last = e.collectedAt[name] || -COLLECT_COOLDOWN;
-    if (now - last < COLLECT_COOLDOWN) return 0;
-    e.collectedAt[name] = now;
-    e.income += b.payout;
-    w.cash = (w.cash || 0) + b.payout;
-    if (typeof w.toast === 'function') w.toast(`Protection collected from ${name}: $${b.payout}.`);
-    return b.payout;
+    const now = world.elapsed || 0;
+    const last = e.protection[business] || -Infinity;
+    // Cooldown: 1 in-game hour. Tracked in elapsed seconds vs hour length.
+    const hourLen = world.secondsPerHour || 60;
+    if (now - last < hourLen) {
+      if (world.events) world.events.push({ type: 'toast', text: `${business}: protection already collected this hour.` });
+      return 0;
+    }
+    e.protection[business] = now;
+    world.cash = (world.cash || 0) + b.pay;
+    if (world.player) world.player.cash = world.cash;
+    if (world.events) world.events.push({ type: 'toast', text: `Collected $${b.pay} protection from ${business}.` });
+    return b.pay;
   }
 
-  // Post a hired crew member to guard a district: its control decays
-  // slower and rival attacks on it are weaker. Recall to follow again.
-  function postCrew(memberId, district) {
-    e.posts[memberId] = district;
-    const member = Array.isArray(w.crew) ? w.crew.find((m) => m && (m.id === memberId || m.name === memberId)) : null;
-    if (member) { member.state = 'posted'; member.postedTo = district; }
+  // Rival family threat rises after each Legacy mission; main calls this.
+  function raiseThreat(n) {
+    e.rivalThreat = Math.max(0, Math.min(100, e.rivalThreat + (n || 5)));
+    return e.rivalThreat;
+  }
+
+  function postCrew(member, district) {    if (!member) return false;
+    const id = member.id || member.name || String(world.crew ? world.crew.indexOf(member) : 0);
+    e.crewPosts[id] = { memberId: id, district, postedAt: world.elapsed || 0 };
+    member.posted = district;
+    member.following = false;
+    if (world.events) world.events.push({ type: 'toast', text: `${member.name || 'Crew'} posted to guard ${district}.` });
     return true;
   }
-  function recallCrew(memberId) {
-    delete e.posts[memberId];
-    const member = Array.isArray(w.crew) ? w.crew.find((m) => m && (m.id === memberId || m.name === memberId)) : null;
-    if (member) { member.state = 'follow'; delete member.postedTo; }
+
+  function recallCrew(member) {
+    if (!member) return false;
+    const id = member.id || member.name || String(world.crew ? world.crew.indexOf(member) : 0);
+    delete e.crewPosts[id];
+    member.posted = null;
+    member.following = true;
+    if (world.events) world.events.push({ type: 'toast', text: `${member.name || 'Crew'} recalled to follow you.` });
     return true;
   }
+
   function postedIn(district) {
-    return Object.entries(e.posts).filter(([, d]) => d === district).map(([id]) => id);
+    return Object.values(e.crewPosts).filter(p => p.district === district).length;
   }
 
-  function raiseThreat(amount) {
-    e.threat = Math.min(100, e.threat + amount);
-    return e.threat;
-  }
-  function lowerThreat(amount) {
-    e.threat = Math.max(0, e.threat - amount);
-    return e.threat;
-  }
-
-  function rivalAttack() {
-    const territories = w.systemObjects && w.systemObjects.territories;
-    const controlled = territories && territories.control
-      ? Object.keys(territories.control).filter((d) => territories.control[d] > 60)
-      : [];
-    // Attack the richest controlled district first, so losing it hurts.
-    const incomeOf = (d) => (territories && territories.income ? territories.income[d] || 0 : 0);
-    controlled.sort((a, b) => incomeOf(b) - incomeOf(a));
-    const district = controlled.length > 0 ? controlled[0]
-      : 'Downtown';
-    state.lastAttackDistrict = district;
-    e.lastAttackAt = w.elapsed || 0;
-    if (territories && typeof territories.startAttack === 'function') territories.startAttack(district);
-    else if (typeof w.toast === 'function') w.toast(`Rival family is attacking ${district}!`);
-    return district;
+  function spawnRivalSquad(district) {
+    const combat = world.systemObjects && world.systemObjects.combat;
+    const guards = postedIn(district);
+    const count = Math.max(2, 4 - guards); // posted crew weakens the attack
+    const p = world.player.position;
+    for (let i = 0; i < count; i++) {
+      const x = p.x + (Math.random() - 0.5) * 28;
+      const z = p.z + (Math.random() - 0.5) * 28;
+      if (combat && combat.spawnShooter) combat.spawnShooter(x, z, 'gang');
+      else {
+        if (!world.enemies) world.enemies = [];
+        if (!world.gangShooters) world.gangShooters = [];
+        const s = { position: { x, z }, health: 80, kind: 'gang', state: 'chase' };
+        world.enemies.push(s);
+        world.gangShooters.push(s);
+      }
+    }
+    if (world.events) world.events.push({ type: 'toast', text: `Rival family attacking ${district}! Defend it or lose 20 control.` });
+    e._activeRivalAttack = { district, resolved: false, startedAt: world.elapsed || 0 };
   }
 
   function update(dt) {
-    if (w.mode !== 'play') return;
-    // Rival threat creeps up over time.
-    e.threat = Math.min(100, e.threat + dt * 0.0012);
-    // Posted crew slow control decay is handled by territories reading
-    // empire.posts; here we trigger rival attacks at high threat.
-    if (e.threat >= THREAT_ATTACK_AT && (w.elapsed || 0) - e.lastAttackAt > 300) {
-      rivalAttack();
+    // Rival family threat rises over time.
+    threatTimer += dt;
+    if (threatTimer > 30) {
+      threatTimer = 0;
+      e.rivalThreat = Math.min(100, e.rivalThreat + 1);
     }
-    // Control decay: guarded districts decay slower.
-    const territories = w.systemObjects && w.systemObjects.territories;
-    if (territories && territories.control) {
-      for (const d of Object.keys(territories.control)) {
-        if (territories.control[d] <= 0) continue;
-        const guarded = postedIn(d).length > 0;
-        const rate = guarded ? 0.0004 : 0.0012;
-        territories.control[d] = Math.max(0, territories.control[d] - rate * dt);
+    // At high threat, rival squads attack a controlled district.
+    const terr = world.systemObjects && world.systemObjects.territories;
+    if (e.rivalThreat >= 70 && !e._activeRivalAttack) {
+      const controlled = terr
+        ? terr.districts.filter(d => terr.getControl(d) > 60)
+        : Object.keys((world.territories && world.territories.control) || {}).filter(d => (world.territories.control[d] || 0) > 60);
+      if (controlled.length) {
+        const district = controlled[Math.floor(Math.random() * controlled.length)];
+        spawnRivalSquad(district);
+        e.rivalThreat = Math.max(40, e.rivalThreat - 25);
+      }
+    }
+    // Resolve rival attack: squad wiped = held; timeout = -20 control.
+    const atk = e._activeRivalAttack;
+    if (atk && !atk.resolved) {
+      const alive = (world.gangShooters || []).filter(s => s && s.health > 0 && s.kind === 'gang').length;
+      const age = (world.elapsed || 0) - atk.startedAt;
+      if (alive === 0) {
+        atk.resolved = true;
+        if (world.events) world.events.push({ type: 'toast', text: `${atk.district} defended from the rival family.` });
+      } else if (age > 180) {
+        atk.resolved = true;
+        if (terr) terr.addControl(atk.district, -20);
+        if (world.events) world.events.push({ type: 'toast', text: `${atk.district} lost 20 control to the rival family.` });
+      }
+    }
+    // Posted crew slows control decay (handled by territories via this flag).
+    const h = typeof world.hourOfDay === 'number' ? world.hourOfDay : lastHour;
+    if (h !== lastHour) {
+      lastHour = h;
+      // Gentle decay of unguarded controlled districts, halved where posted.
+      if (terr) {
+        for (const d of terr.districts) {
+          const c = terr.getControl(d);
+          if (c > 60) {
+            const guards = postedIn(d);
+            const decay = guards > 0 ? 0.5 : 1;
+            terr.addControl(d, -decay);
+          }
+        }
+      }
+    }
+    // Empire menu hook: visiting Anchor Bar + E is handled by main via
+    // collectProtection('Anchor Bar') and the menu flag below.
+    if (world.input && world.input.keys && world.input.keys['KeyE']) {
+      const b = businessByName('Anchor Bar');
+      const p = world.player.position;
+      if (b && Math.hypot(p.x - b.x, p.z - b.z) < 4) {
+        world.empireMenuOpen = true;
       }
     }
   }
 
-  const api = {
-    update, collectProtection, businessAt, postCrew, recallCrew, postedIn,
-    raiseThreat, lowerThreat, rivalAttack, businesses: BUSINESSES,
-    get threat() { return e.threat; },
-    get income() { return e.income; },
-    get posts() { return e.posts; },
-    get lastAttackDistrict() { return state.lastAttackDistrict; },
+  return {
+    update, collectProtection, postCrew, recallCrew, raiseThreat,
+    businesses: BUSINESSES,
+    postedIn,
+    get rivalThreat() { return e.rivalThreat; },
   };
-  if (Array.isArray(w.systems)) w.systems.push(api);
-  if (scene) {
-    // Visible markers for each business.
-    for (const b of BUSINESSES) {
-      const marker = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.2, 1.2, 0.15, 16),
-        new THREE.MeshStandardMaterial({ color: 0xffd24a, emissive: 0x664400 }),
-      );
-      marker.position.set(b.x, 0.1, b.z);
-      scene.add(marker);
-    }
-  }
-  return api;
 }
-
-export default createEmpire;

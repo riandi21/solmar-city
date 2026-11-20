@@ -1,226 +1,196 @@
-// Fishing — the calm mini-game at the Sunset Beach pier and the marina pier.
-// Press E at a fishing spot to cast, wait for the bobber to dip, press E
-// again to reel in. Catches: small fish $20, big fish $80, junk $0.
-// The best catch is tracked in the kingpin state and shown on the HUD.
-// Fishing is calm: no wanted gain, and it passes in-game time.
-// Every entry in spots[] includes a bobber field (v10 fix).
-// Factory: createFishing(scene, world) or createFishing(world).
+// Fishing mini-game (NEW): Sunset Beach pier and the marina pier.
+// Press E at a spot to cast, wait for a bite (the bobber dips),
+// press E again to reel in. Catches: small fish $20, big fish $80,
+// junk $0. Best catch is tracked in world.kingpin.fishingBest and
+// shown on the HUD. Fishing is calm — no wanted gain — and passes
+// in-game time. CRITICAL: every spot in spots() includes a `bobber`.
 
 export const FISHING_SPOTS = [
-  { id: 'sunset', name: 'Sunset Beach Pier', x: -150, z: 320 },
-  { id: 'marina', name: 'Marina Pier', x: 295, z: 168 },
-  { id: 'islands', name: 'Islands Beach Bar', x: 370, z: 360 },
+  { key: 'sunset', name: 'Sunset Beach Pier', x: -175, z: 305 },
+  { key: 'marina', name: 'Marina Pier', x: 200, z: 180 },
 ];
 
-export const CATCH_VALUES = { small: 20, big: 80, junk: 0 };
+const CAST_RADIUS = 10;
+const BITE_MIN = 3;   // seconds until a bite can arrive
+const BITE_MAX = 8;
+const BITE_WINDOW = 2.5; // seconds the bobber stays dipped
 
-function normalizeArgs(scene, world) {
-  if (world === undefined || world === null) {
-    if (scene && (typeof scene.cash === 'number' || scene.player || scene.kingpin)) return { scene: null, world: scene };
-    return { scene: null, world: scene || {} };
-  }
-  return { scene, world };
+function posOf(world) {
+  const p = world.player || {};
+  const q = p.position || p;
+  return { x: Number(q.x ?? p.x ?? 0), z: Number(q.z ?? p.z ?? q.y ?? p.y ?? 0) };
 }
 
-function playerPos(world) {
-  const p = world.player;
-  if (!p) return null;
-  if (p.position && typeof p.position.x === 'number') return { x: p.position.x, z: p.position.z || 0 };
-  if (typeof p.x === 'number') return { x: p.x, z: p.z || 0 };
-  return null;
+function cashOf(world) { return Number(world.cash ?? world.player?.cash ?? 0); }
+
+function setCash(world, value) {
+  const v = Math.max(0, Math.floor(value));
+  world.cash = v;
+  if (world.player) world.player.cash = v;
+  return v;
 }
 
 function toast(world, text) {
-  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text });
-  else if (typeof world.toast === 'function') world.toast(text);
-  else if (Array.isArray(world.messages)) world.messages.push(text);
+  if (typeof world.addToast === 'function') { world.addToast(text); return; }
+  if (Array.isArray(world.events)) world.events.push({ type: 'toast', text, message: text });
 }
 
-function keyDown(world, key) {
-  const input = world.input;
-  if (!input) return false;
-  if (input.pressed && typeof input.pressed.has === 'function') return input.pressed.has(key);
-  if (input.keys && typeof input.keys.has === 'function') return input.keys.has(key);
-  if (input[key] === true) return true;
+function keyDown(world, ...codes) {
+  const keys = world.input?.keys;
+  if (!keys) return false;
+  for (const c of codes) if (keys.has(c)) return true;
   return false;
 }
 
-function rngOf(world) {
-  if (typeof world.rng === 'function') return world.rng;
-  return Math.random;
+function hasBetterRod(world) {
+  const props = world.systemObjects?.properties;
+  if (props && typeof props.hasBetterRod === 'function') return props.hasBetterRod();
+  if (props && typeof props.isOwned === 'function') return props.isOwned('surf');
+  return Boolean(world.properties?.owned?.surf);
 }
 
-export function createFishing(scene, world) {
-  const args = normalizeArgs(scene, world);
-  scene = args.scene;
-  world = args.world;
+export function createFishing(world) {
+  if (!world.kingpin || typeof world.kingpin !== 'object') world.kingpin = {};
+  // fishingBest: { kind, value, label } — null until the first catch.
 
-  if (!world.kingpin) world.kingpin = {};
-  if (typeof world.cash !== 'number') world.cash = 0;
+  // One live bobber per spot; spots() always returns these objects,
+  // so every entry carries a real `bobber` field.
+  const bobbers = {};
+  for (const spot of FISHING_SPOTS) {
+    bobbers[spot.key] = {
+      x: spot.x, z: spot.z, y: 0,
+      visible: false, dipped: false, state: 'idle',
+    };
+  }
 
-  // Every spot carries its own bobber object — never a bare constant.
-  const spots = FISHING_SPOTS.map((s) => ({
-    id: s.id,
-    name: s.name,
-    x: s.x,
-    z: s.z,
-    bobber: { x: s.x, y: 0.4, z: s.z + 2, dipped: false, visible: false, dipTime: 0 },
-  }));
-
-  const state = {
-    fishing: false,
-    casting: false,
-    waiting: false,
-    bite: false,
-    spot: null,
-    biteTimer: 0,
-    biteWindow: 0,
-    bestCatch: world.kingpin.fishingBestCatch || null,
-  };
-  world.fishing = state;
-
+  let state = 'idle'; // idle | waiting | bite
+  let activeSpot = null;
+  let biteTimer = 0;
+  let biteLeft = 0;
   let prevE = false;
 
-  function ownsSurfShack() {
-    return !!(world.properties && world.properties.owned && world.properties.owned.surfshack);
+  function spots() {
+    return FISHING_SPOTS.map((s) => ({
+      x: s.x, z: s.z, key: s.key, name: s.name,
+      bobber: bobbers[s.key],
+    }));
   }
 
-  function hasBetterRod() {
-    // The Surf Shack sells a better rod: doubles big-fish odds.
-    return ownsSurfShack();
-  }
-
-  function nearestSpot(pos, maxDist) {
-    let best = null;
-    let bestD = maxDist === undefined ? Infinity : maxDist;
-    for (const spot of spots) {
-      const d = Math.hypot(spot.x - pos.x, spot.z - pos.z);
-      if (d < bestD) { bestD = d; best = spot; }
+  function nearestSpot() {
+    const p = posOf(world);
+    let best = null, bestD = Infinity;
+    for (const s of FISHING_SPOTS) {
+      const dx = p.x - s.x, dz = p.z - s.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d < bestD) { bestD = d; best = s; }
     }
-    return best ? { spot: best, distance: bestD } : null;
+    return bestD <= CAST_RADIUS ? best : null;
   }
 
   function cast(spot) {
-    const target = spot || state.spot;
-    if (!target) return { ok: false, reason: 'no spot' };
-    state.fishing = true;
-    state.casting = true;
-    state.waiting = true;
-    state.bite = false;
-    state.spot = target;
-    state.biteTimer = 2 + rngOf(world)() * 3;
-    state.biteWindow = 0;
-    target.bobber.visible = true;
-    target.bobber.dipped = false;
-    target.bobber.y = 0.4;
-    toast(world, `Cast at ${target.name}… wait for the bobber to dip.`);
-    return { ok: true, spot: target };
+    if (state !== 'idle') return false;
+    const target = spot || nearestSpot();
+    if (!target) { toast(world, 'Find a fishing spot — the Sunset Beach pier or the marina pier.'); return false; }
+    const key = target.key || (FISHING_SPOTS.find((s) => s.x === target.x && s.z === target.z) || {}).key;
+    if (!key || !bobbers[key]) return false;
+    activeSpot = FISHING_SPOTS.find((s) => s.key === key);
+    state = 'waiting';
+    biteTimer = BITE_MIN + Math.random() * (BITE_MAX - BITE_MIN);
+    biteLeft = 0;
+    const bobber = bobbers[key];
+    bobber.visible = true; bobber.dipped = false; bobber.state = 'waiting';
+    toast(world, 'Line cast at ' + activeSpot.name + '… wait for the bobber to dip.');
+    return true;
   }
 
   function rollCatch() {
-    const rng = rngOf(world);
-    const bigChance = hasBetterRod() ? 0.5 : 0.25;
-    const roll = rng();
-    if (roll < bigChance) return { kind: 'big', value: CATCH_VALUES.big, label: 'Big fish' };
-    if (roll < bigChance + 0.55) return { kind: 'small', value: CATCH_VALUES.small, label: 'Small fish' };
-    return { kind: 'junk', value: CATCH_VALUES.junk, label: 'Junk' };
+    const betterRod = hasBetterRod(world);
+    // Better rod (Surf Shack) doubles big-fish odds: 25% -> 50%.
+    const roll = Math.random();
+    if (betterRod) {
+      if (roll < 0.50) return { kind: 'big', value: 80, label: 'Big fish!' };
+      if (roll < 0.90) return { kind: 'small', value: 20, label: 'Small fish' };
+      return { kind: 'junk', value: 0, label: 'Junk' };
+    }
+    if (roll < 0.25) return { kind: 'big', value: 80, label: 'Big fish!' };
+    if (roll < 0.85) return { kind: 'small', value: 20, label: 'Small fish' };
+    return { kind: 'junk', value: 0, label: 'Junk' };
   }
 
   function reelIn() {
-    if (!state.fishing || !state.waiting) return { ok: false, reason: 'nothing to reel' };
-    const spot = state.spot;
-    const caughtBite = state.bite;
-    state.fishing = false;
-    state.casting = false;
-    state.waiting = false;
-    state.bite = false;
-    if (spot) { spot.bobber.visible = false; spot.bobber.dipped = false; spot.bobber.y = 0.4; }
-    if (!caughtBite) {
-      toast(world, 'Reeled in too early — the fish got away.');
-      return { ok: false, reason: 'too early' };
+    if (state === 'idle') return false;
+    if (state === 'waiting') {
+      // Reeled in too early — scared the fish off.
+      const bobber = activeSpot ? bobbers[activeSpot.key] : null;
+      if (bobber) { bobber.visible = false; bobber.dipped = false; bobber.state = 'idle'; }
+      state = 'idle'; activeSpot = null;
+      toast(world, 'Reeled in too early — no bite yet.');
+      return false;
     }
+    // state === 'bite': a catch!
     const fish = rollCatch();
-    world.cash += fish.value;
-    const record = { kind: fish.kind, value: fish.value, label: fish.label, at: world.elapsed || 0 };
-    if (!state.bestCatch || fish.value > state.bestCatch.value) {
-      state.bestCatch = record;
-      world.kingpin.fishingBestCatch = record;
+    const bobber = activeSpot ? bobbers[activeSpot.key] : null;
+    if (bobber) { bobber.visible = false; bobber.dipped = false; bobber.state = 'idle'; }
+    state = 'idle'; activeSpot = null;
+    if (fish.value > 0) {
+      setCash(world, cashOf(world) + fish.value);
+      const best = world.kingpin.fishingBest;
+      if (!best || fish.value > Number(best.value ?? 0)) {
+        world.kingpin.fishingBest = { kind: fish.kind, value: fish.value, label: fish.label };
+      }
+      toast(world, fish.label + ' Caught! Sold for $' + fish.value + '.');
+    } else {
+      toast(world, 'Just junk… nothing to sell. ($0)');
     }
-    toast(world, fish.value > 0 ? `Caught a ${fish.label.toLowerCase()}! +$${fish.value}` : 'Caught junk — nothing but an old boot.');
-    if (Array.isArray(world.events)) world.events.push({ type: 'fish-caught', catch: record });
-    return { ok: true, catch: record };
-  }
-
-  function cancel() {
-    if (state.spot) { state.spot.bobber.visible = false; state.spot.bobber.dipped = false; }
-    state.fishing = false;
-    state.casting = false;
-    state.waiting = false;
-    state.bite = false;
-    state.spot = null;
-  }
-
-  // Cast at the nearest spot to a position (used by scripted shots/tests).
-  function castAt(x, z) {
-    const near = nearestSpot({ x, z }, 8);
-    if (!near) return { ok: false, reason: 'no spot nearby' };
-    return cast(near.spot);
+    return fish.value > 0;
   }
 
   function update(dt) {
-    // Bite timing while a line is in the water.
-    if (state.fishing && state.waiting && !state.bite) {
-      state.biteTimer -= dt;
-      if (state.biteTimer <= 0) {
-        state.bite = true;
-        state.biteWindow = 2.5;
-        if (state.spot) {
-          state.spot.bobber.dipped = true;
-          state.spot.bobber.y = 0.05;
-          state.spot.bobber.dipTime = world.elapsed || 0;
+    const step = Math.max(0, Number(dt) || 0);
+    if (state === 'waiting') {
+      biteTimer -= step;
+      if (biteTimer <= 0) {
+        state = 'bite';
+        biteLeft = BITE_WINDOW;
+        if (activeSpot) {
+          const bobber = bobbers[activeSpot.key];
+          bobber.dipped = true; bobber.y = -0.25; bobber.state = 'bite';
         }
+        toast(world, 'Bite! Reel in now (E)!');
       }
-    } else if (state.bite) {
-      state.biteWindow -= dt;
-      if (state.biteWindow <= 0) {
-        // The fish got away.
-        if (state.spot) { state.spot.bobber.dipped = false; state.spot.bobber.y = 0.4; }
-        state.bite = false;
-        state.biteTimer = 2 + rngOf(world)() * 3;
+    } else if (state === 'bite') {
+      biteLeft -= step;
+      if (biteLeft <= 0) {
+        // Fish got away.
+        if (activeSpot) {
+          const bobber = bobbers[activeSpot.key];
+          bobber.visible = false; bobber.dipped = false; bobber.y = 0; bobber.state = 'idle';
+        }
+        state = 'idle'; activeSpot = null;
+        toast(world, 'Too slow — the fish got away.');
       }
     }
-    // E is edge-triggered: cast at a spot, reel in on a bite.
-    const eDown = keyDown(world, 'KeyE') || keyDown(world, 'e') || keyDown(world, 'E');
-    const pos = playerPos(world);
-    if (eDown && !prevE && pos) {
-      const onFoot = !world.playerCar && !(world.player && world.player.currentCar) && !(world.player && world.player.inVehicle);
-      if (state.fishing) {
-        reelIn();
-      } else if (onFoot) {
-        const near = nearestSpot(pos, 6);
-        if (near) cast(near.spot);
-      }
+
+    // E edge: cast at a spot, or reel in when waiting / on a bite.
+    const eDown = keyDown(world, 'KeyE', 'e', 'E');
+    if (eDown && !prevE) {
+      if (state === 'idle') cast(nearestSpot());
+      else reelIn();
     }
     prevE = eDown;
   }
 
-  const system = {
-    spots,
-    state,
-    isFishing: () => state.fishing,
-    hasBite: () => state.bite,
-    bestCatch: () => state.bestCatch,
-    nearestSpot,
-    cast,
-    castAt,
-    reelIn,
-    cancel,
-    hasBetterRod,
-    ownsSurfShack,
-    update,
-  };
-  if (Array.isArray(world.systems) && !world.systems.includes(system.update)) world.systems.push(system.update);
-  return system;
-}
+  // Best catch so far, for the HUD (null until the first catch).
+  function best() {
+    return world.kingpin.fishingBest || null;
+  }
 
-export default createFishing;
+  return {
+    update,
+    spots,
+    cast,
+    reelIn,
+    best,
+    get state() { return state; },
+  };
+}
