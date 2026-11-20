@@ -1,61 +1,56 @@
-// Seeded randomness for Solmar City.
-// createRng MUST return a CALLABLE function: districts and the city call
-// rng() directly for a number in [0, 1). Helpers ride on the function
-// object itself (range, int, pick, chance, shuffle). Same seed, same city.
+// Seeded RNG for Solmar City (Round 16, v16).
+// createRng(seed) returns a CALLABLE function: rng() -> [0, 1).
+// Helpers ride on the function object itself, so districts can call
+// rng() directly and also use rng.chance / rng.int / rng.pick / rng.range.
+
 export function createRng(seed = 1337) {
-  let state = (seed | 0) || 1;
+  // mulberry32 — small, fast, deterministic across runs and browsers.
+  let a = (seed | 0) >>> 0;
   function rng() {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
-  rng.next = rng;
-  rng.seed = seed;
-  rng.range = function range(min, max) {
-    return min + rng() * (max - min);
-  };
-  rng.int = function int(min, max) {
-    return Math.floor(rng.range(min, max + 1));
-  };
-  rng.pick = function pick(list) {
-    if (!list || list.length === 0) return undefined;
-    return list[Math.floor(rng() * list.length)];
-  };
-  rng.choice = rng.pick;
+  // True with probability p (p in [0, 1]).
   rng.chance = function chance(p) {
     return rng() < p;
   };
-  rng.shuffle = function shuffle(list) {
-    const copy = list.slice();
-    for (let i = copy.length - 1; i > 0; i -= 1) {
+  // Integer in [min, max] inclusive.
+  rng.int = function int(min, max) {
+    const lo = Math.ceil(min);
+    const hi = Math.floor(max);
+    if (hi < lo) return lo;
+    return lo + Math.floor(rng() * (hi - lo + 1));
+  };
+  // Uniform float in [min, max).
+  rng.range = function range(min, max) {
+    return min + rng() * (max - min);
+  };
+  // Random element of a non-empty array (undefined for an empty one).
+  rng.pick = function pick(arr) {
+    if (!arr || arr.length === 0) return undefined;
+    return arr[Math.floor(rng() * arr.length)];
+  };
+  // Extra helpers districts may use; harmless if unused.
+  rng.shuffle = function shuffle(arr) {
+    const out = arr.slice();
+    for (let i = out.length - 1; i > 0; i -= 1) {
       const j = Math.floor(rng() * (i + 1));
-      const tmp = copy[i];
-      copy[i] = copy[j];
-      copy[j] = tmp;
+      const tmp = out[i];
+      out[i] = out[j];
+      out[j] = tmp;
     }
-    return copy;
+    return out;
   };
-  rng.sign = function sign() {
-    return rng() < 0.5 ? -1 : 1;
+  // Approximately normal (mean 0, stddev 1) via Box-Muller.
+  rng.normal = function normal() {
+    const u = Math.max(rng(), 1e-9);
+    const v = rng();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   };
-  // Bell-shaped draw around 0 (mean 0, roughly unit spread) for natural jitter.
-  rng.gaussian = function gaussian() {
-    return (rng() + rng() + rng() - 1.5) * 0.8;
-  };
-  rng.weighted = function weighted(pairs) {
-    let total = 0;
-    for (const [, w] of pairs) total += w;
-    let roll = rng() * total;
-    for (const [value, w] of pairs) {
-      roll -= w;
-      if (roll <= 0) return value;
-    }
-    return pairs[pairs.length - 1][0];
-  };
+  rng.seed = seed | 0;
   return rng;
 }
 
-// Back-compat alias: the starter used createRandom.
-export const createRandom = createRng;
 export default createRng;
