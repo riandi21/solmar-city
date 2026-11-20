@@ -1,12 +1,19 @@
+# Build / hand-in output
 out/
-node_modules/
-.DS_Store
-*.log
+output/
+
+# Editor and OS files
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
-.vscode/
-.idea/
-# Local playtest captures and temp output stay out of the repo.
-screenshots/*.tmp
-tmp/
+.DS_Store
+Thumbs.db
+
+# Local tooling
+node_modules/
+*.log
+*.tmp
+.env
+.env.local

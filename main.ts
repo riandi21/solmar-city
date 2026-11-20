@@ -1,75 +1,78 @@
-// Solmar City hand-in (Node 22, standard library only): the game is this
-// directory's game/ folder — plain static files a desktop browser loads
-// offline (game/index.html and its ES modules, three.js vendored under
-// game/vendor/, no network request) — and this program hands it in. It copies
-// game/ and screenshots/ from beside this file to /output and writes
-// /output/dossier.json, the summary the judge reads, with the vendored
-// make.fun library. The game itself is an open-world crime game: Rico Vega,
-// 44 story missions, a 9x9 city with Sunset Beach, the marina, the airfield
-// and the islands, cars, bikes, boats, jet skis, a seaplane and a flyable
-// helicopter, police with wanted levels, Heat and cartel threat, crew,
-// properties, territories, an empire, fishing, casino games and street races.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// main.ts — Solmar City hand-in entrypoint (Node 22, standard library only).
+// Copies game/ and screenshots/ from beside this file into the output
+// directory (/output, or $MAKEFUN_OUTPUT_DIR when set) and writes
+// /output/dossier.json with buildDossier from the vendored make.fun library.
+// Prints the hand-in line (game file count and bytes, screenshot count)
+// and exits 0.
 
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const here = dirname(fileURLToPath(import.meta.url));
+const outDir = resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
 
-function countTree(dir) {
-  let files = 0;
-  let bytes = 0;
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    const info = statSync(path);
-    if (info.isDirectory()) {
-      const sub = countTree(path);
-      files += sub.files;
-      bytes += sub.bytes;
-    } else {
-      files += 1;
-      bytes += info.size;
+async function walk(dir: string, base: string, out: { files: string[]; bytes: number }): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await walk(full, base, out);
+    } else if (entry.isFile()) {
+      const info = await stat(full);
+      out.files.push(full.slice(base.length + 1));
+      out.bytes += info.size;
     }
   }
-  return { files, bytes };
 }
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+async function countJpegs(dir: string): Promise<number> {
+  let n = 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile() && /\.jpe?g$/i.test(entry.name)) n++;
+      if (entry.isDirectory()) n += await countJpegs(join(dir, entry.name));
+    }
+  } catch {
+    // Missing screenshots/ is not fatal: the dossier just records zero.
+  }
+  return n;
+}
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
-// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
-// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
+async function main(): Promise<void> {
+  await mkdir(outDir, { recursive: true });
+  const gameDir = join(here, 'game');
+  const shotsDir = join(here, 'screenshots');
+
+  await cp(gameDir, join(outDir, 'game'), { recursive: true });
+  try {
+    await cp(shotsDir, join(outDir, 'screenshots'), { recursive: true });
+  } catch {
+    await mkdir(join(outDir, 'screenshots'), { recursive: true });
+  }
+
+  const gameStats = { files: [] as string[], bytes: 0 };
+  await walk(gameDir, gameDir, gameStats);
+  gameStats.files.sort();
+  const shotCount = await countJpegs(shotsDir);
+
+  const dossier = buildDossier(outDir, {
     text_max_bytes: 163840,
     screenshots: { max: 4, max_bytes: 262144 },
     game_max_files: 993,
     game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+  });
+  await writeFile(join(outDir, 'dossier.json'), dossier, 'utf8');
 
-const gameStats = countTree(join(here, 'game'));
-const shotDir = join(here, 'screenshots');
-const shotCount = existsSync(shotDir)
-  ? readdirSync(shotDir).filter((n) => !n.startsWith('.')).length
-  : 0;
-const shotBytes = existsSync(shotDir)
-  ? readdirSync(shotDir)
-      .filter((n) => !n.startsWith('.'))
-      .reduce((sum, n) => sum + statSync(join(shotDir, n)).size, 0)
-  : 0;
-console.log(
-  `HAND-IN Solmar City: game files ${gameStats.files} (${gameStats.bytes} bytes), screenshots ${shotCount} (${shotBytes} bytes)`,
+  console.log(`Solmar City handed in: ${gameStats.files.length} game files (${gameStats.bytes} bytes), ${shotCount} screenshots -> ${outDir}`);
+}
+
+main().then(
+  () => process.exit(0),
+  (err: unknown) => {
+    console.error('Hand-in failed:', err);
+    process.exit(1);
+  },
 );
